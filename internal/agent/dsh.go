@@ -350,6 +350,32 @@ func dshOurs(it dshItem) bool {
 // dshWired reports whether a profile's patch list has magpie's route.
 func dshWired(items []dshItem) bool { return dshRouteIn(items) != nil }
 
+// dshServes reports whether magpie gives dsh this model now: the route
+// written again would list it, where one naming a model magpie no longer
+// gives dsh would not.
+func dshServes(id string) bool {
+	for _, m := range magpieModels("dsh") {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// dshRouteLists reports whether magpie's route carries a model with this id.
+func dshRouteLists(route *yaml.Node, id string) bool {
+	models := yamlKey(route, "models")
+	if models == nil {
+		return false
+	}
+	for _, m := range models.Content {
+		if v := yamlKey(m, "id"); v != nil && v.Value == id {
+			return true
+		}
+	}
+	return false
+}
+
 var dshModelLine = regexp.MustCompile(`^\s+model:\s*(.+?)\s*$`)
 
 // dshGet reads the model new sessions start on: the one last picked in dsh,
@@ -363,6 +389,13 @@ func dshGet(dir string) string {
 	if err != nil {
 		return ""
 	}
+	return dshStart(dir, items)
+}
+
+// dshStart reads the model a profile's sessions start on: the one last picked
+// in dsh, saved in its settings, which go over every profile, else the
+// profile's own agent-default-model entry.
+func dshStart(dir string, items []dshItem) string {
 	sel := edit.GetYAMLMap(filepath.Join(dir, "settings.yaml"), "agent-default-model")
 	if sel["model"] == "" {
 		if i := dshFindLast(items, "agent-default-model"); i >= 0 {
@@ -403,8 +436,9 @@ func dshGetLegacy(path string) string {
 
 // dshCheck says what keeps a dsh on one of magpie's models from reaching
 // the gateway: magpie's route (its llm-deepseek entry before 0.1.5) pointed
-// elsewhere, or — since 0.1.5 — the key it names gone from .env, or another
-// key under that name in dsh's own store, which it reads first.
+// elsewhere, the model it starts on one the route doesn't list, or — since
+// 0.1.5 — the key it names gone from .env, or another key under that name in
+// dsh's own store, which it reads first.
 func dshCheck(dir string) string {
 	if !usesMagpie(dshGet(dir)) {
 		return ""
@@ -448,6 +482,32 @@ func dshCheck(dir string) string {
 	}
 	if off := wiringOff("DeepSeek Harness", files[0], get, "baseURL", gatewayV1()); off != "" {
 		return off
+	}
+	// dsh counts a model its provider doesn't list as none at all and refuses
+	// the turn, so a model of magpie's a profile's route has not is as
+	// unusable there as a route pointed elsewhere: a catalog that moved on, a
+	// profile written elsewhere, or one dsh's Models page wrote leave it that
+	// way. Every profile carries a route of its own, and dsh runs whichever
+	// one its session names, so every profile is asked.
+	for _, f := range files {
+		_, it, err := dshRead(f)
+		if err != nil {
+			continue
+		}
+		r := dshRouteIn(it)
+		if r == nil {
+			continue // no route yet: the sync this asks for writes one
+		}
+		if ref, ok := strings.CutPrefix(dshStart(dir, it), magpieID+"/"); ok && !dshRouteLists(r, ref) {
+			// a route out of date is written again — Apply again, or picking
+			// a model of magpie's in dsh, does it; one naming a model magpie
+			// no longer gives dsh is not, so that one asks for another model
+			// rather than for a click that cannot help
+			if dshServes(ref) {
+				return "DeepSeek Harness starts on " + magpieID + "/" + ref + ", which magpie's route in " + f + " doesn't list: a session there fails with no such configured model until that route is written again (Apply again, or pick one of magpie's models in dsh)"
+			}
+			return "DeepSeek Harness starts on " + magpieID + "/" + ref + ", which magpie no longer gives dsh: a session there fails with no such configured model until another of magpie's is picked in dsh"
+		}
 	}
 	env := filepath.Join(dir, ".env")
 	if off := wiringOff("DeepSeek Harness", env, func(k string) (string, bool) { return edit.GetEnvFile(env, k) },

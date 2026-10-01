@@ -1,0 +1,29 @@
+{
+  "summary": "这个 PR 只改了顶栏布局判定函数 fitTop()：在判断右侧按钮是否超出顶栏内边距时放宽 0.5 CSS 像素，使窗口变宽后导航能从紧凑（左移）布局回到居中布局，其余界面元素没有变化。",
+  "scenes": [
+    {
+      "title": "顶栏导航与右侧按钮",
+      "shots": [
+        {
+          "file": "01-header-nav.png",
+          "caption": "magpie 顶栏：品牌、导航标签与右侧的刷新、设置按钮",
+          "width": 2560
+        },
+        {
+          "file": "02-window-default.png",
+          "caption": "1280×800 下的整个窗口，顶栏相对窗口的位置",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": null,
+  "poster": null,
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "改动只在顶栏可用宽度正好卡在边界时才有可见差别：Windows 150% 缩放叠加 magpie 125% 文字缩放的 WebView2 会给出带小数偏差的矩形（约 0.00002 CSS 像素），此时加宽窗口原本会卡在紧凑布局，现在会回到居中。本沙盒是 1280×800 的浏览器（web 模式，--zoom 为 1）中的 Chromium，既不能调整窗口宽度，也不存在那个取整偏差，因此「导航从紧凑恢复居中」以及「真正的 2 CSS 像素溢出仍触发紧凑布局」这两种状态都复现不出来，只能展示该顶栏本身。",
+  "interactive": false,
+  "pages": 1
+}

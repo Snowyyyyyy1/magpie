@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#399 界面预览 · 098b922</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#399 界面预览</h1><p class="m">commit 098b922 · <a href="https://github.com/yetone/magpie/pull/399">回到 PR</a> · 为 Claude Desktop 增加可单独配置的 opus/sonnet/haiku/fable 档位：Agent 页的 Claude Desktop 行出现分档按钮，点开后可在菜单里为每个档位挑选模型，未配置的档位在菜单和选择器里注明将使用目录首项模型；同时网关按这些档位路由并把 tier 变更标记为无需重启。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure><img src="01-desktop-row.png" alt="Claude Desktop 一行：provider 字段和右侧的分档按钮"><figcaption>Claude Desktop 的四个档位 · Claude Desktop 一行：provider 字段和右侧的分档按钮</figcaption></figure>
+<figure><img src="02-tiers-menu.png" alt="分档菜单：opus、sonnet、haiku、fable 四项及各自下面的说明"><figcaption>Claude Desktop 的四个档位 · 分档菜单：opus、sonnet、haiku、fable 四项及各自下面的说明</figcaption></figure>
+<figure><img src="03-haiku-picker.png" alt="haiku 的模型选择器，注意顶部那项的说明文字"><figcaption>Claude Desktop 的四个档位 · haiku 的模型选择器，注意顶部那项的说明文字</figcaption></figure>
+<figure><img src="04-desktop-row-after.png" alt="回到 Agent 页，Claude Desktop 一行现在的分档摘要"><figcaption>Claude Desktop 的四个档位 · 回到 Agent 页，Claude Desktop 一行现在的分档摘要</figcaption></figure>
+<figure><img src="05-tiers-menu-after.png" alt="分档菜单：已配置的档位和其余档位的说明"><figcaption>Claude Desktop 的四个档位 · 分档菜单：已配置的档位和其余档位的说明</figcaption></figure>
+</main></html>

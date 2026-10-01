@@ -1,0 +1,29 @@
+{
+  "summary": "这次改动只在桌面窗口宽度不超过 680px 时生效：Agent 列表里每行的名字与右侧的模型/effort 等控件改为上下两行排列，普通宽度下仍保持名字在左、控件在右并对齐。改动本身是 app.css 里新增的一条媒体查询，另外补了浏览器测试和文档。",
+  "scenes": [
+    {
+      "title": "Agent 列表：改动所在的那一页",
+      "shots": [
+        {
+          "file": "01-agents-list-wide.png",
+          "caption": "Agent 列表（浏览器宽度 1280px）",
+          "width": 2560
+        },
+        {
+          "file": "02-agents-list-expanded.png",
+          "caption": "展开后的 Agent 列表",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "窄窗口布局的条件是 CSS 视口宽度 ≤680px，而录制用的浏览器固定 1280×800，录制过程中也没有改变窗口大小的操作，因此看不到控件落到 Agent 名字下方的那一版；沙盒里的 Agent 都是刚装好的，行里通常只有 provider 之类的控件，模型列也是空的。所以这里只能拍到改动发生的那一页（Agent 列表）在普通宽度下的样子。",
+  "interactive": true,
+  "pages": 2
+}

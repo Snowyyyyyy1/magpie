@@ -1,0 +1,51 @@
+{
+  "summary": "这个 diff 给浏览器里的 magpie（body.web）补了一整套窄屏/触摸样式：顶栏标签换到单独一行并可横向滚动、表单和列表行换行、触摸目标放大到 44px、用量统计改两列、图表日期标签自动隐藏重叠项、弹层宽度收在视口内、编辑器与资源库/路由块改成单列；同时让手指惯性滚动可以继续（停手后保护恢复），触摸设备上打开模型浮层时不再自动弹键盘，并给页面视口加上安全区（viewport-fit=cover）。",
+  "scenes": [
+    {
+      "title": "用量页的统计与图表",
+      "shots": [
+        {
+          "file": "01-usage-overview.png",
+          "caption": "用量页概览：统计卡片、柱状图和它的日期标签",
+          "width": 2560
+        },
+        {
+          "file": "02-usage-sessions-chart.png",
+          "caption": "会话页签里的柱状图和它的日期标签",
+          "width": 2560
+        }
+      ]
+    },
+    {
+      "title": "Agent 行的模型选择浮层",
+      "shots": [
+        {
+          "file": "03-agents-list.png",
+          "caption": "Agent 列表：顶栏的标签栏和每行上的模型字段",
+          "width": 2560
+        },
+        {
+          "file": "04-model-picker-pop.png",
+          "caption": "打开的模型选择浮层",
+          "width": 1120
+        },
+        {
+          "file": "05-agents-list.png",
+          "caption": "关闭浮层后的 Agent 列表",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [
+    "Agent 行的模型选择浮层 · click #view-agents .row.agent button.field: won't press \"magpie provider：magpie · Desktop's third\""
+  ],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒是 1280×800 的桌面浏览器，这些规则只在 max-width:760px 或 (pointer: coarse) 且 max-width:1024px 时生效，两个条件都不满足，所以手机端布局本身（顶栏标签单独一行、44px 触摸目标、用量 KPI 两列、图表日期标签隐藏重叠项、弹层/编辑器/连接区单列、资源库头部与路由组换行）在这里看不到；手指惯性滚动可以继续、以及触摸设备上模型浮层不自动聚焦键盘，也都需要触摸设备。另外路由页目前没有路由组，.rt-group 的手机样式没有可看的元素。",
+  "interactive": true,
+  "pages": 2
+}

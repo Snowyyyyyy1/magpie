@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#433 界面预览 · 07ed431</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#433 界面预览</h1><p class="m">commit 07ed431 · <a href="https://github.com/yetone/magpie/pull/433">回到 PR</a> · 供应商页的「添加供应商」不再把面板撑进列表并把页面滚下去，而是从底部浮出一个带遮罩的浮层盖在列表上，列表位置与滚动高度不变；浮层可用关闭按钮、遮罩空白处和 Esc 关闭，标题行改为可换行、选项区域自己滚动。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure><img src="01-providers-before.png" alt="供应商页：DeepSeek，以及页面底部的「添加供应商」"><figcaption>添加供应商浮层与 Esc 关闭 · 供应商页：DeepSeek，以及页面底部的「添加供应商」</figcaption></figure>
+<figure><img src="02-add-overlay.png" alt="打开后的浮层与它下面的供应商列表"><figcaption>添加供应商浮层与 Esc 关闭 · 打开后的浮层与它下面的供应商列表</figcaption></figure>
+<figure><img src="03-after-escape.png" alt="按 Esc 之后的供应商页"><figcaption>添加供应商浮层与 Esc 关闭 · 按 Esc 之后的供应商页</figcaption></figure>
+<figure><img src="04-sheet-open.png" alt="浮层：标题行、搜索框和按钮"><figcaption>浮层内搜索与关闭按钮 · 浮层：标题行、搜索框和按钮</figcaption></figure>
+<figure><img src="05-sheet-filtered.png" alt="筛选后的供应商选项区域"><figcaption>浮层内搜索与关闭按钮 · 筛选后的供应商选项区域</figcaption></figure>
+<figure><img src="06-after-close-button.png" alt="用关闭按钮关掉之后的供应商页"><figcaption>浮层内搜索与关闭按钮 · 用关闭按钮关掉之后的供应商页</figcaption></figure>
+</main></html>

@@ -1,0 +1,54 @@
+{
+  "summary": "供应商页的「添加供应商」不再把面板撑进列表并把页面滚下去，而是从底部浮出一个带遮罩的浮层盖在列表上，列表位置与滚动高度不变；浮层可用关闭按钮、遮罩空白处和 Esc 关闭，标题行改为可换行、选项区域自己滚动。",
+  "scenes": [
+    {
+      "title": "添加供应商浮层与 Esc 关闭",
+      "shots": [
+        {
+          "file": "01-providers-before.png",
+          "caption": "供应商页：DeepSeek，以及页面底部的「添加供应商」",
+          "width": 2560
+        },
+        {
+          "file": "02-add-overlay.png",
+          "caption": "打开后的浮层与它下面的供应商列表",
+          "width": 2560
+        },
+        {
+          "file": "03-after-escape.png",
+          "caption": "按 Esc 之后的供应商页",
+          "width": 2560
+        }
+      ]
+    },
+    {
+      "title": "浮层内搜索与关闭按钮",
+      "shots": [
+        {
+          "file": "04-sheet-open.png",
+          "caption": "浮层：标题行、搜索框和按钮",
+          "width": 1896
+        },
+        {
+          "file": "05-sheet-filtered.png",
+          "caption": "筛选后的供应商选项区域",
+          "width": 1896
+        },
+        {
+          "file": "06-after-close-button.png",
+          "caption": "用关闭按钮关掉之后的供应商页",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒里只有 DeepSeek 一个供应商，列表没有可滚动空间，所以「反复打开/关闭后列表位置和滚动高度保持一致、关闭后无空白」这一核心效果看不出差别；录制中也不能改变窗口尺寸，窄窗口下仅选项区域独立滚动同样无法展示。另外「点击遮罩关闭」需要点浮层外的空白坐标，录制只能点元素中心，所以这里用 Esc 和关闭按钮演示关闭路径。",
+  "interactive": true,
+  "pages": 1
+}

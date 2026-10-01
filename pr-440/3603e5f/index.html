@@ -1,0 +1,13 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#440 界面预览 · 3603e5f</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#440 界面预览</h1><p class="m">commit 3603e5f · <a href="https://github.com/yetone/magpie/pull/440">回到 PR</a> · 这次改动只在桌面窗口宽度不超过 680px 时生效：Agent 列表里每行的名字与右侧的模型/effort 等控件改为上下两行排列，普通宽度下仍保持名字在左、控件在右并对齐。改动本身是 app.css 里新增的一条媒体查询，另外补了浏览器测试和文档。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure><img src="01-agents-list-wide.png" alt="Agent 列表（浏览器宽度 1280px）"><figcaption>Agent 列表：改动所在的那一页 · Agent 列表（浏览器宽度 1280px）</figcaption></figure>
+<figure><img src="02-agents-list-expanded.png" alt="展开后的 Agent 列表"><figcaption>Agent 列表：改动所在的那一页 · 展开后的 Agent 列表</figcaption></figure>
+</main></html>

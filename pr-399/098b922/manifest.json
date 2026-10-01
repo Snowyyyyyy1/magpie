@@ -1,0 +1,44 @@
+{
+  "summary": "为 Claude Desktop 增加可单独配置的 opus/sonnet/haiku/fable 档位：Agent 页的 Claude Desktop 行出现分档按钮，点开后可在菜单里为每个档位挑选模型，未配置的档位在菜单和选择器里注明将使用目录首项模型；同时网关按这些档位路由并把 tier 变更标记为无需重启。",
+  "scenes": [
+    {
+      "title": "Claude Desktop 的四个档位",
+      "shots": [
+        {
+          "file": "01-desktop-row.png",
+          "caption": "Claude Desktop 一行：provider 字段和右侧的分档按钮",
+          "width": 2560
+        },
+        {
+          "file": "02-tiers-menu.png",
+          "caption": "分档菜单：opus、sonnet、haiku、fable 四项及各自下面的说明",
+          "width": 1120
+        },
+        {
+          "file": "03-haiku-picker.png",
+          "caption": "haiku 的模型选择器，注意顶部那项的说明文字",
+          "width": 1120
+        },
+        {
+          "file": "04-desktop-row-after.png",
+          "caption": "回到 Agent 页，Claude Desktop 一行现在的分档摘要",
+          "width": 2560
+        },
+        {
+          "file": "05-tiers-menu-after.png",
+          "caption": "分档菜单：已配置的档位和其余档位的说明",
+          "width": 1120
+        }
+      ]
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "四个 discovery 别名（如「DeepSeek V4 Pro · Opus」）只出现在 Claude Desktop 客户端读到的 /v1/models 列表里，magpie 自己的界面不显示；沙盒也没有安装 Claude Desktop，无法展示它里面的档位选择与「目标有级别时才出现的 effort 选择器」——DeepSeek 目录里没有带 effort/thinking 层级的模型，这一条无从呈现。切换 Desktop provider 后才出现的「需重启 Desktop」提示同样看不到，因为那要先断开当前连接。",
+  "interactive": true,
+  "pages": 1
+}

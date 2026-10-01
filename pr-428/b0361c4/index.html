@@ -1,0 +1,13 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#428 界面预览 · b0361c4</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#428 界面预览</h1><p class="m">commit b0361c4 · <a href="https://github.com/yetone/magpie/pull/428">回到 PR</a> · 这个 PR 只改了顶栏布局判定函数 fitTop()：在判断右侧按钮是否超出顶栏内边距时放宽 0.5 CSS 像素，使窗口变宽后导航能从紧凑（左移）布局回到居中布局，其余界面元素没有变化。</p>
+
+<figure><img src="01-header-nav.png" alt="magpie 顶栏：品牌、导航标签与右侧的刷新、设置按钮"><figcaption>顶栏导航与右侧按钮 · magpie 顶栏：品牌、导航标签与右侧的刷新、设置按钮</figcaption></figure>
+<figure><img src="02-window-default.png" alt="1280×800 下的整个窗口，顶栏相对窗口的位置"><figcaption>顶栏导航与右侧按钮 · 1280×800 下的整个窗口，顶栏相对窗口的位置</figcaption></figure>
+</main></html>

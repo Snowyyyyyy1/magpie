@@ -1,0 +1,29 @@
+{
+  "summary": "网关页「接入」标题右侧的提示新增了第三种状态：网关监听到回环之外且未开启局域网共享时，提示改为「已开放到网络 · 任何能连上的人用任意密钥都能访问」（并补了对应中文文案）；命令行打印的地址改用 MAGPIE_PUBLIC_URL（不在这些界面里）。",
+  "scenes": [
+    {
+      "title": "网关接入区的新提示状态",
+      "shots": [
+        {
+          "file": "01-gateway-connect-area.png",
+          "caption": "网关页：网关卡片、接入标题与右侧提示、接入区",
+          "width": 2560
+        },
+        {
+          "file": "02-connect-hint-state.png",
+          "caption": "「接入」标题右侧的提示文案",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": null,
+  "poster": null,
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "描述说网关页的接入区会把 MAGPIE_PUBLIC_URL 作为网络地址显示在「这台电脑」地址旁边；本 diff 的界面代码只往 gatewayJSON 加了 open 字段并在接入提示里加了一条分支，没有新增地址选择器、公网地址行或任何设置项——公网地址的列出沿用 base 已有代码，不是这个 PR 加的。README/CLI 输出也不属于这些页面。",
+  "unseen": "沙盒里网关只监听回环、未开启局域网共享、也没有设置 MAGPIE_PUBLIC_URL，所以 open 为 false：新增的「已开放到网络 · 任何能连上的人用任意密钥都能访问」这条提示，以及公网地址那一条，都不会出现。要看到新提示需要 MAGPIE_ADDR 监听到回环之外且不共享（Docker 镜像的默认状态），要看到公网地址还需要设置 MAGPIE_PUBLIC_URL 并开启局域网共享。",
+  "interactive": false,
+  "pages": 1
+}

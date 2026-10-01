@@ -1,0 +1,15 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#412 界面预览 · c48688c</title>
+<style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+a{color:inherit}</style>
+<main><h1>#412 界面预览</h1><p class="m">commit c48688c · <a href="https://github.com/yetone/magpie/pull/412">回到 PR</a> · 设置页新增「可观测性」一节（#otelList）：OTLP 导出的开关、端点与请求头输入框、以及独立的「导出指标」开关，全部默认关闭；端点和请求头按回车即保存，环境变量存在时会多一行提示。</p>
+<figure><video src="preview.mp4" controls autoplay muted playsinline poster="poster.png"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。空格暂停，← → 逐段查看。</figcaption></figure>
+<figure><img src="01-otel-section-default.png" alt="设置中「可观测性」一节的初始状态"><figcaption>设置里的可观测性一节 · 设置中「可观测性」一节的初始状态</figcaption></figure>
+<figure><img src="02-otel-endpoint-headers.png" alt="填好端点与请求头之后的可观测性一节"><figcaption>填写端点与请求头并开启导出 · 填好端点与请求头之后的可观测性一节</figcaption></figure>
+<figure><img src="03-otel-export-on.png" alt="OTLP 导出开启后的可观测性一节"><figcaption>填写端点与请求头并开启导出 · OTLP 导出开启后的可观测性一节</figcaption></figure>
+<figure><img src="04-otel-metrics-on.png" alt="导出指标开启、两个开关都打开时的可观测性一节"><figcaption>填写端点与请求头并开启导出 · 导出指标开启、两个开关都打开时的可观测性一节</figcaption></figure>
+</main></html>

@@ -1,0 +1,44 @@
+{
+  "summary": "设置页新增「可观测性」一节（#otelList）：OTLP 导出的开关、端点与请求头输入框、以及独立的「导出指标」开关，全部默认关闭；端点和请求头按回车即保存，环境变量存在时会多一行提示。",
+  "scenes": [
+    {
+      "title": "设置里的可观测性一节",
+      "shots": [
+        {
+          "file": "01-otel-section-default.png",
+          "caption": "设置中「可观测性」一节的初始状态",
+          "width": 2560
+        }
+      ]
+    },
+    {
+      "title": "填写端点与请求头并开启导出",
+      "shots": [
+        {
+          "file": "02-otel-endpoint-headers.png",
+          "caption": "填好端点与请求头之后的可观测性一节",
+          "width": 2560
+        },
+        {
+          "file": "03-otel-export-on.png",
+          "caption": "OTLP 导出开启后的可观测性一节",
+          "width": 2560
+        },
+        {
+          "file": "04-otel-metrics-on.png",
+          "caption": "导出指标开启、两个开关都打开时的可观测性一节",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "沙盒没有设置任何 MAGPIE_OTEL_* 环境变量，所以「环境变量会覆盖这里保存的 OTLP 设置」这一行提示不会出现，只能看到这四个设置行。沙盒里也没有可接收的 OTLP collector，界面只负责保存开关、端点与请求头，真正的 trace/metric 上报、批量与重试、队列丢弃、后台异步与退出排空都无法在界面上看到；settings.json 改为 0600、无密钥备份剔除请求头同样不体现于界面。",
+  "interactive": true,
+  "pages": 2
+}

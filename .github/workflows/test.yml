@@ -65,6 +65,12 @@ jobs:
         if: runner.os == 'Windows'
         run: go test -run '^$' ./...
 
+      # Usage isolates USERPROFILE and the agent homes; execute its native
+      # ChangeTime checks rather than only cross-compiling the Windows API.
+      - name: Windows usage cache
+        if: runner.os == 'Windows'
+        run: go test -count=1 ./internal/usage -run '^(TestWindows|TestLogChange|TestLogFileInfoPreservesIdentity$|TestUsageSameSizeAndMtimeRewrite$|TestLogGrowingRewriteThenAppend$)'
+
   cli:
     name: cli (nogui)
     runs-on: ubuntu-latest

@@ -469,7 +469,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	budget := int64(requestCacheBytes)
 	if snapshot.uncached {
 		budget = 0
-		shared.pages = nil
+		shared.pages = map[pageKey]RequestPage{}
 	}
 
 	type cachedChunk struct {

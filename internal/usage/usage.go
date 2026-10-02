@@ -134,9 +134,9 @@ func Append(r Record) {
 		return
 	}
 	defer f.Close()
-	before, _ := f.Stat()
+	before, _ := statLogHandle(f)
 	if _, err := f.Write(append(b, '\n')); err == nil {
-		after, _ := f.Stat()
+		after, _ := statLogHandle(f)
 		noteLogAppend(Path(), before, after)
 	}
 }

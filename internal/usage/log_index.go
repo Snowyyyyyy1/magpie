@@ -53,7 +53,7 @@ func logSnapshotFor(metadataOnly bool) *logSnapshot {
 	logIndex.Lock()
 	defer logIndex.Unlock()
 	path := Path()
-	info, err := os.Stat(path)
+	info, err := statLogFile(path)
 	old := logIndex.snapshot
 	unchanged := old != nil && old.path == path && (err != nil && old.info == nil || err == nil && sameLogInfo(old.info, info))
 	if unchanged && info != nil && logChangeStamp(info) == "" {
@@ -75,7 +75,7 @@ func logSnapshotFor(metadataOnly bool) *logSnapshot {
 	notePath, noteBase, noteLast := logAppends.path, logAppends.base, logAppends.last
 	logAppends.Unlock()
 	trusted := logChangeStamp(info) != "" && notePath == path && sameLogInfo(oldInfo(old), noteBase) && sameLogInfo(info, noteLast)
-	continued := old != nil && old.path == path && old.info != nil && os.SameFile(old.info, info) && info.Size() > old.info.Size() && (trusted || old.hash != "" && recordHash(path, old.info.Size()) == old.hash)
+	continued := old != nil && old.path == path && old.info != nil && sameLogFile(old.info, info) && info.Size() > old.info.Size() && (trusted || old.hash != "" && recordHash(path, old.info.Size()) == old.hash)
 	if continued && !old.uncached {
 		next.off, next.first = old.off, old.first
 		next.blocks = slices.Clone(old.blocks)
@@ -195,7 +195,7 @@ func oldInfo(s *logSnapshot) os.FileInfo {
 	return s.info
 }
 func sameLogInfo(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && logChangeStamp(a) == logChangeStamp(b)
+	return a != nil && b != nil && sameLogFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && logChangeStamp(a) == logChangeStamp(b)
 }
 
 // Append records the exact file states around its successful write. Contiguous

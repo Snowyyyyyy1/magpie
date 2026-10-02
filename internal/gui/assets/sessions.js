@@ -1,7 +1,9 @@
 // Sessions: every session of an agent on this computer, by the folder it
 // ran in, to pick up again or to delete. A delete asks first, in magpie's
 // own dialog, and moves the session's files into magpie's trash; the Trash
-// lists them, each with a Restore. A session written to in the last minute
+// lists them, each with a Restore and a Delete forever, and can be emptied;
+// erasing for good asks in the same dialog, and is only ever done when the
+// reader asks for it. A session written to in the last minute
 // may still be running, and is left as it is. Everything comes from
 // /api/sessions/manage.
 (() => {
@@ -19,6 +21,7 @@
   let openedFor = "";         // the agent the folders were first unfolded for
   let detail = "";            // the session opened to its details
   let loading = 0;
+  let fitObserver = null;
 
   const TRASH = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v4M9 7v4";
   const TERM = "M3 4.5 6 7.5 3 10.5M7.5 11.5h5.5";
@@ -49,31 +52,81 @@
   };
 
   function draw() {
+    const keepFocus = page.querySelector(".sm-agent-pick:focus, .sm-agents .opt:focus");
+    fitObserver?.disconnect();
+    if (page.querySelector(".sm-agent-pick.open")) closeProtoMenu();
     page.classList.toggle("loading", !data?.sessions && !failed);
     page.replaceChildren(head(), body());
+    const wrap = page.querySelector(".sm-switch");
+    const tabs = wrap.querySelector(".sm-agents");
+    const pick = wrap.querySelector(".sm-agent-pick");
+    const fit = () => {
+      const room = parseFloat(getComputedStyle(wrap).width);
+      if (!room) return;
+      const focused = document.activeElement;
+      // Measure the actual labels, including language, font and text zoom,
+      // rather than guessing a breakpoint or a number of agents.
+      tabs.hidden = false;
+      const compact = tabs.scrollWidth > Math.floor(room);
+      tabs.hidden = compact || !data?.agents.length;
+      pick.hidden = !compact || !current();
+      if (!compact && pick.classList.contains("open")) closeProtoMenu();
+      if (compact && tabs.contains(focused)) pick.focus({ preventScroll: true });
+      else if (!compact && focused === pick) tabs.querySelector(".on")?.focus({ preventScroll: true });
+    };
+    fitObserver = new ResizeObserver(fit);
+    fitObserver.observe(wrap);
+    fit();
+    if (keepFocus) (pick.hidden ? tabs.querySelector(".on") : pick)?.focus({ preventScroll: true });
+  }
+
+  function chooseAgent(name) {
+    if (name === data.agent && !trashOn) return;
+    trashOn = false;
+    agent = name;
+    try { localStorage.setItem("magpie.sessionsAgent", name); } catch {}
+    picked.clear();
+    detail = "";
+    data = { ...data, agent: name, sessions: null };
+    draw();
+    load(name);
   }
 
   function head() {
     const h = el("div", "usage-head sm-head");
-    const seg = el("div", "segs regions sm-agents");
-    for (const a of data?.agents || []) {
-      const b = el("button", "opt" + (a.agent === data.agent && !trashOn ? " on" : ""));
+    const wrap = el("div", "sm-switch");
+    const tabs = el("div", "segs regions sm-agents");
+    for (const x of data?.agents || []) {
+      const on = x.agent === data.agent && !trashOn;
+      const b = el("button", "opt" + (on ? " on" : ""));
       b.type = "button";
-      b.append(icon(a.icon), el("span", "", a.name), el("em", "", String(a.count)));
-      b.onclick = () => {
-        if (a.agent === data.agent && !trashOn) return;
-        trashOn = false;
-        agent = a.agent;
-        try { localStorage.setItem("magpie.sessionsAgent", a.agent); } catch {}
-        picked.clear();
-        detail = "";
-        data = { ...data, agent: a.agent, sessions: null };
-        draw();
-        load(a.agent);
-      };
-      seg.append(b);
+      b.setAttribute("aria-pressed", String(on));
+      b.append(icon(x.icon), el("span", "", x.name), el("em", "", String(x.count)));
+      b.onclick = () => chooseAgent(x.agent);
+      tabs.append(b);
     }
-    h.append(seg, el("span", "grow"));
+    const a = current();
+    const pick = el("button", "sess-pick sm-agent-pick");
+    pick.type = "button";
+    pick.hidden = !a;
+    pick.disabled = (data?.agents.length || 0) < 2;
+    pick.setAttribute("aria-haspopup", "menu");
+    pick.setAttribute("aria-expanded", "false");
+    if (a) {
+      pick.title = a.name;
+      pick.append(icon(a.icon), el("span", "", a.name), el("em", "", String(a.count)), svg(CHEV, 11, 1.6));
+      pick.onclick = (e) => {
+        e.stopPropagation();
+        if (pick.classList.contains("open")) return closeProtoMenu();
+        const opts = data.agents.map((x) => ({ v: x.agent, name: x.name, note: String(x.count), literalName: true }));
+        openProtoMenu(pick, opts, data.agent, (name) => {
+          pick.focus({ preventScroll: true });
+          chooseAgent(name);
+        }, "Agent", "sm-agent-menu");
+      };
+    }
+    wrap.append(tabs, pick);
+    h.append(wrap);
     const q = el("input", "sess-filter sm-filter");
     q.type = "search";
     q.spellcheck = false;
@@ -257,7 +310,7 @@
     };
     line(t("Time"), stamp(s.start || s.last) + " – " + stamp(s.last));
     if (s.cwd) line(t("Folder"), s.cwd);
-    line(t("Session"), s.id, copyBtn(s.id, t("Session id")));
+    line(t("Session ID"), s.id, copyBtn(s.id, t("Session id")));
     if (s.resume) line(t("Resume"), el("code", "", s.resume), copyBtn(s.resume, t("Resume command")));
     if (s.path) line(t("File"), s.path + (s.files > 1 ? " " + t("+{n} more", { n: s.files - 1 }) : ""));
     return d;
@@ -317,9 +370,67 @@
     cancel.focus({ preventScroll: true });
   }
 
+  // askPurge asks in magpie's dialog before trashed sessions are erased for
+  // good: the ones listed, or the whole trash (all)
+  function askPurge(list, all) {
+    if (!list.length) return;
+    const ed = el("div", "editor sm-ask sm-ask-purge");
+    const h = el("div", "ehead");
+    h.append(svg(TRASH, 15, 1.4), el("b", "", all ? t("Empty magpie's trash?") : t("Delete this session forever?")));
+    ed.append(h);
+    const names = el("ul", "sm-ask-list");
+    for (const x of list.slice(0, 5)) names.append(el("li", "", x.title || x.id));
+    if (list.length > 5) names.append(el("li", "more", t("+{n} more", { n: list.length - 5 })));
+    ed.append(names);
+    ed.append(el("p", "lib-confirm", all ? t("Every session in magpie's trash is erased for good: it can't be restored.") : t("Its files are erased for good: it can't be restored.")));
+    const bar = el("div", "bar");
+    const go = el("button", "text primary danger-fill", all ? t("Empty trash") : t("Delete forever"));
+    go.type = "button";
+    go.onclick = async (e) => {
+      e.stopPropagation();
+      go.disabled = true;
+      go.classList.add("busy");
+      let out;
+      try {
+        out = await api("sessions/purge", all ? { all: true } : { keys: list.map((x) => x.key) });
+      } catch (err) {
+        go.disabled = false;
+        go.classList.remove("busy");
+        status(err.message, "err");
+        return;
+      }
+      closeConfirmAsk();
+      if (out.refused.length) {
+        const first = out.refused[0], x = list.find((y) => y.key === first.key);
+        status((x?.title || x?.id || first.key) + ": " + first.error, "err");
+      } else {
+        status(t(out.purged.length === 1 ? "Erased for good" : "{n} sessions erased for good", { n: out.purged.length }), "ok");
+      }
+      await load();
+    };
+    const cancel = el("button", "text", t("Cancel"));
+    cancel.type = "button";
+    cancel.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+    bar.append(el("span", "grow"), cancel, go);
+    ed.append(bar);
+    confirmAsk = ed;
+    openModal(ed);
+    $("#modal").classList.add("lib");
+    cancel.focus({ preventScroll: true });
+  }
+
   function trash() {
     const out = [];
     const items = data.trash;
+    if (items.length) {
+      const bar = el("div", "row-head sm-bar sm-trash-bar");
+      const empty = el("button", "text danger sm-empty");
+      empty.type = "button";
+      empty.append(svg(TRASH, 13, 1.4), el("span", "", t("Empty trash")));
+      empty.onclick = () => askPurge(items, true);
+      bar.append(el("span", "note sm-count", t(items.length === 1 ? "{n} session" : "{n} sessions", { n: items.length })), el("span", "grow"), empty);
+      out.push(bar);
+    }
     if (!items.length) {
       const e = el("div", "empty-state");
       e.append(el("b", "", t("Trash is empty")), el("span", "", t("Sessions deleted here wait in magpie's trash, to be restored.")));
@@ -351,11 +462,18 @@
           await load();
         };
         r.append(b);
+        const del = el("button", "copy sm-del sm-purge");
+        del.type = "button";
+        del.title = t("Delete forever");
+        del.setAttribute("aria-label", t("Delete forever"));
+        del.append(svg(TRASH, 13, 1.4));
+        del.onclick = (e) => { e.stopPropagation(); askPurge([x], false); };
+        r.append(del);
         l.append(r);
       }
       out.push(l);
     }
-    out.push(el("p", "usage-note", t("Deleted sessions are kept in {dir}; magpie never erases them. Remove that folder yourself to free the space.", { dir: data.trashDir })));
+    out.push(el("p", "usage-note", t("Deleted sessions are kept in {dir} until you erase them here; magpie never erases them by itself.", { dir: data.trashDir })));
     return out;
   }
 })();

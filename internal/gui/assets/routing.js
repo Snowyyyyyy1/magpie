@@ -183,7 +183,8 @@
   const where = (w) => w.kind === "provider" || !w.who ? w.name || w.provider : `${w.name || w.provider} · ${w.who}`;
   // why one is left out: an account's plan lacks the model; a key's list
   // from its vendor does — relays list each key its own group's models
-  const unlistedWord = (w) => w.kind === "key" ? t("{name}'s list for this key has no {model}", { name: w.name, model: w.model }) : t("its plan doesn't list {model}", { model: w.model });
+  // or the user set the account or key to serve other models only (#474)
+  const unlistedWord = (w) => w.barred ? t("set to serve other models, not {model}", { model: w.model }) : w.kind === "key" ? t("{name}'s list for this key has no {model}", { name: w.name, model: w.model }) : t("its plan doesn't list {model}", { model: w.model });
   const group = (w) => w.used >= 98 ? "spent" : w.used >= 90 ? "low" : "fine";
   const renews = (w) => (w.renews || []).map((s) => known0(s) ? at(s) : 0);
 
@@ -297,7 +298,9 @@
     }
     const pooled = r.order.find((x) => !x.aside && x.kind === "key");
     for (const x of r.order.filter((x) => x.aside)) out.push(t("{who} is made for {api}, not {other} as the keys routed over are, so it isn't one of them: it's tried after them.", { who: who(x), api: API[x.speaks] || x.speaks || t("any API"), other: API[pooled?.speaks] || pooled?.speaks || t("any API") }));
-    for (const x of r.left || []) out.push(x.kind === "key"
+    for (const x of r.left || []) out.push(x.barred
+      ? t("{who} is left out: it is set to serve other models, not {model}.", { who: who(x), model: x.model })
+      : x.kind === "key"
       ? t("{who} is left out: {name} lists {model} to its other keys, not this one.", { who: who(x), name: x.name, model: x.model })
       : t("{who} is left out: its plan doesn't list {model}.", { who: who(x), model: x.model }));
     return out;
@@ -504,7 +507,7 @@
   const BLOCKED = "the provider's network firewall blocked requests from this IP; wait a while, or switch to another network or proxy";
   // what it says of ZCode's Start Plan turning a request away (#425,
   // provider.ZCodeStartBlockedHint), in place of BLOCKED
-  const ZCODE_BLOCKED = "ZCode's Start Plan turns away requests that don't come from the ZCode app itself, and magpie doesn't pretend to be it; it can also be a network block of this IP. Use an account with a GLM Coding Plan, or add another provider to this group";
+  const ZCODE_BLOCKED = "ZCode's Start Plan still turned this request away, though magpie sends it as the ZCode app does; it can be a network block of this IP, or ZCode checking for something new. Use an account with a GLM Coding Plan, or add another provider to this group";
   const HINTS = [WB_REFUSED, BLOCKED, ZCODE_BLOCKED];
 
   function trySaid(r, i) {
@@ -674,10 +677,24 @@
     }
   }
 
+  // rankOf is an account's or key's place in its provider's own list, the
+  // order its page shows and a drag sets (#217): the list as it is now, so
+  // a drag moves it at once; else as the request found it
+  function rankOf(w) {
+    const p = providers?.providers?.find((x) => x.id === w.provider);
+    let i = -1;
+    if (p?.account && w.kind === "account") {
+      const user = (w.who || "").toLowerCase();
+      i = loginsInOrder(p.account).findIndex((l) => (l.user || "").toLowerCase() === user);
+    } else if (p && w.kind === "key") i = (p.keyList || []).findIndex((k) => w.id === p.id + "#" + k.id);
+    return i >= 0 ? i : (p ? 1000 : 0) + (w.rank || 0);
+  }
+
   // seated: a route's accounts and keys each in a place of its own, not in
   // the order routing weighed them this time — the group's members in the
-  // group's order, a provider's fallbacks after its own, then by name — so
-  // the column holds still while the one put first moves.
+  // group's order, a provider's fallbacks after its own, then each
+  // provider's in its own order — so the column holds still while the one
+  // put first moves.
   // One whose vendor doesn't list the model to it is never asked, so it
   // isn't drawn — only told of, among why it went where it did.
   function seated(r) {
@@ -685,7 +702,7 @@
     const key = (w) => {
       let m = members.indexOf(w.provider + "/" + w.model + (w.fixed ? ":" + w.fixed : ""));
       if (m < 0) m = members.findIndex((x) => x.startsWith(w.provider + "/"));
-      return [w.fallback ? 1 : 0, m < 0 ? members.length : m, w.name || w.provider, w.aside ? 1 : 0, w.who || "", w.id];
+      return [w.fallback ? 1 : 0, m < 0 ? members.length : m, w.name || w.provider, w.aside ? 1 : 0, rankOf(w), w.who || "", w.id];
     };
     const cmp = (a, b) => {
       const x = key(a), y = key(b);
@@ -1419,7 +1436,7 @@
         if (tr.rest && end >= a.restAt) { a.rest = tr.rest; a.restAt = end; }
       }
     }
-    const list = [...by.values()].sort((x, y) => (x.w.name || "").localeCompare(y.w.name || "") || x.w.provider.localeCompare(y.w.provider) || x.pos - y.pos);
+    const list = [...by.values()].sort((x, y) => (x.w.name || "").localeCompare(y.w.name || "") || x.w.provider.localeCompare(y.w.provider) || rankOf(x.w) - rankOf(y.w) || x.pos - y.pos);
     setText(actLabel, t("Accounts and keys"));
     setText(actNote, t("over those requests"));
     const n = now();
@@ -2008,7 +2025,8 @@
     renderPanel();
   }
   new MutationObserver(words).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
-  document.addEventListener("magpie-costs-changed", () => steady(renderHist));
+  // a count follows Settings' number units, the panel's "today" with it
+  document.addEventListener("magpie-costs-changed", () => { steady(renderHist); renderPanel(); });
 
   // ---------- routing groups ----------
   // The groups agents can pick as one model (group/<id>): the user's, and
@@ -2019,7 +2037,10 @@
   const gsec = el("div", "rt-gsec");
   const gHead = el("div", "row-head"), gList = el("div", "list rt-groups");
   const pHead = el("div", "row-head"), pList = el("div", "list rt-pools");
-  gsec.append(gHead, gList, pHead, pList);
+  // whether magpie finds groups on its own, by the list it fills (蓝猫 on
+  // Discord: they could only be removed one at a time)
+  const gFound = el("div", "rt-gfound");
+  gsec.append(gHead, gFound, gList, pHead, pList);
   // after the requests: a request picked in the list plays on the stage,
   // so the list sits right under it
   more.append(gsec);
@@ -2104,11 +2125,14 @@
     const newBtn = el("button", "text", t("New group"));
     newBtn.onclick = () => { gEdit = { id: "", draft: { name: "", members: [], fast: [], routing: "", affinity: "", rules: [] } }; renderGroups(); };
     gHead.replaceChildren(el("span", "label", t("Routing groups")), el("span", "grow"), el("span", "note", t("models agents pick as one")), newBtn);
+    drawFound();
     const rows = [];
     if (gEdit && !gEdit.id) rows.push(groupEditor(null));
     const shown = groups.groups.filter((g) => !g.hidden), hidden = groups.groups.filter((g) => g.hidden);
     for (const g of shown) rows.push(gEdit?.id === g.id ? groupEditor(g) : groupRow(g));
-    if (!rows.length) rows.push(el("div", "none rt-gnone", t("No group yet. A model two of your providers serve becomes one on its own; New group makes one of any models you like.")));
+    if (!rows.length) rows.push(el("div", "none rt-gnone", groups.found === false
+      ? t("No group yet. New group makes one of any models you like.")
+      : t("No group yet. A model two of your providers serve becomes one on its own; New group makes one of any models you like.")));
     if (hidden.length) {
       const h = el("div", "rt-ghidden");
       h.append(el("span", "", t("Removed:")));
@@ -2122,6 +2146,41 @@
     }
     gList.replaceChildren(...rows);
     renderPools();
+  }
+  // drawFound: the switch for the groups magpie finds on its own — a
+  // model two or more providers serve, as auto-<model> — all at once.
+  // Off, none is listed or served: the groups the user made or changed
+  // stay, and an agent set to a found one is moved to its model from one
+  // provider (agent.Reseat), as a request still naming one goes there.
+  function drawFound() {
+    const on = groups.found !== false;
+    const s = el("button", "lib-switch" + (on ? " on" : ""));
+    s.type = "button";
+    s.setAttribute("role", "switch");
+    s.setAttribute("aria-checked", String(on));
+    s.setAttribute("aria-label", t("Find groups on their own"));
+    s.append(el("i"));
+    s.onclick = (e) => { e.stopPropagation(); setFound(!on, s); };
+    const txt = el("div", "txt");
+    txt.append(el("b", "", t("Find groups on their own")), el("small", "", on
+      ? t("A model two or more of your providers serve becomes a group of them (auto-…). Switch it off to list and serve only the groups you made or changed.")
+      : t("Off: only the groups you made or changed are listed and served. An agent set to a found group is moved to its model from one provider, and a request still naming one goes there too.")));
+    gFound.replaceChildren(txt, s);
+  }
+  async function setFound(on, s) {
+    s.classList.toggle("on", on);
+    s.setAttribute("aria-checked", String(on));
+    try {
+      groups = await api("groups/found", { on });
+      gEdit = null;
+      renderGroups();
+      saidMoved(on ? t("Found groups are on") : t("Found groups are off: only yours are listed and served"), groups.moved);
+      load(); // the gateway's model list, the agents' pickers
+    } catch (e) {
+      s.classList.toggle("on", !on);
+      s.setAttribute("aria-checked", String(!on));
+      status(e.message, "err");
+    }
   }
   function groupRow(g) {
     const row = el("div", "rt-group" + (g.ready ? "" : " off"));

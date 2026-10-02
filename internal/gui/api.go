@@ -111,6 +111,9 @@ type profileJSON struct {
 	// Library is what the profile gives out from the library, for one
 	// saved with its setup
 	Library *profileLibraryJSON `json:"library,omitempty"`
+	// Agents is what it holds, by agent, to be read before it is applied
+	// (#467); a value that reads as a key or a token is left out
+	Agents []profile.Group `json:"agents"`
 }
 
 type profileLibraryJSON struct {
@@ -197,6 +200,7 @@ type settingsJSON struct {
 	// Mac apps that explicitly handle .command files, for resumed sessions.
 	TerminalApps    []terminalChoice `json:"terminalApps,omitempty"`
 	TerminalDefault string           `json:"terminalDefault,omitempty"`
+	OTelEnv         bool             `json:"otelEnv,omitempty"`
 	// the proxy vendor requests go through now, and where it came from:
 	// settings, environment, system, off or none
 	ProxyNow    string `json:"proxyNow"`
@@ -282,6 +286,11 @@ func settingsState() settingsJSON {
 		s.NotifyProblem = notifyProblem()
 	}
 	s.ProxyNow, s.ProxySource = netproxy.Describe()
+	for _, name := range []string{"MAGPIE_OTEL_ENABLED", "MAGPIE_OTEL_ENDPOINT", "MAGPIE_OTEL_HEADERS", "MAGPIE_OTEL_METRICS"} {
+		if _, ok := os.LookupEnv(name); ok {
+			s.OTelEnv = true
+		}
+	}
 	s.Login = autostart.Enabled()
 	if s.LAN {
 		s.LANURLs, s.LANContainer = gateway.LANURLs(), gateway.ContainerAddrs()
@@ -559,6 +568,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	archiveRoutes(mux)
 	libraryRoutes(mux, w)
 	updateRoutes(mux, w)
+	whatsNewRoutes(mux)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		access.MigrateLegacyLANKeyBestEffort()
 		writeJSON(rw, settingsState())
@@ -586,8 +596,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
-		in.RequestArchive = cur.RequestArchive // the Gateway page's, set on its own
-		in.RedactRules = cur.RedactRules       // the masking rules, set on their own
+		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
+		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
+		in.RedactRules = cur.RedactRules                 // the masking rules, set on their own
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
 		// how agents' lists name models, set on its own for the agents to be told
@@ -892,7 +903,7 @@ func state() stateJSON {
 	}
 	if ps, err := profile.Load(); err == nil {
 		for _, n := range profile.Names(ps) {
-			pj := profileJSON{Name: n, Summary: profile.Summary(ps[n])}
+			pj := profileJSON{Name: n, Summary: profile.Summary(ps[n]), Agents: profile.Details(ps[n])}
 			if l := ps[n].Library; l != nil {
 				servers, skills := l.On()
 				pj.Library = &profileLibraryJSON{Servers: servers, Skills: skills, Instructions: l.GivesInstructions()}

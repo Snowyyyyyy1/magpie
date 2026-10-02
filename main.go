@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/imagemcp"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
@@ -95,6 +96,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
+  magpie update auto [on|off] [30m|1h|6h|24h]  whether the app looks for updates by itself, and how often (6h)
 
 agents: claude (cc), codex, gemini, opencode (oc), mimocode, pi, goose, cursor, copilot, crush
 `
@@ -111,16 +113,27 @@ func main() {
 		// Claude Code, signing in for magpie, handed over the page to open
 		return
 	}
+	endProbesOnSignal()
 	gateway.Version = version
 	netproxy.Install()
 	update.GUI = hasGUI
 	err := run(os.Args[1:])
+	proc.EndProbes() // a CLI still being asked something isn't left to init
 	sessions.Saved() // the session index kept, for the next run
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
 		os.Exit(1)
 	}
 }
+
+// runTUI runs the TUI, which quits on Ctrl+C and SIGTERM itself once it
+// has started; it asks CLIs first, and a signal then ends those.
+func runTUI() error {
+	return tuiRun(ownSignals)
+}
+
+// tuiRun is tui.Run; a var so tests can stand in for it.
+var tuiRun = tui.Run
 
 func run(args []string) error {
 	if len(args) > 0 && args[0] == "healthcheck" {
@@ -151,7 +164,7 @@ func run(args []string) error {
 		if hasGUI {
 			return runGUI(true, "")
 		}
-		return tui.Run()
+		return runTUI()
 	}
 	// a magpie:// link the system handed over (Windows, Linux): the app
 	// opens it for the user to confirm
@@ -163,7 +176,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "tui":
-		return tui.Run()
+		return runTUI()
 	case "web":
 		return webCmd(args[1:])
 	case "app", "gui":

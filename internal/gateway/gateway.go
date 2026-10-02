@@ -302,6 +302,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.lnMu.Lock()
 	s.ln = ln
 	s.lnMu.Unlock()
+	stopOTel := usage.StartOTel()
+	defer stopOTel()
 	srv := &http.Server{Handler: lanGuard(s.Handler()), ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 5 * time.Minute}
 	// the magpie serving the gateway, and only it, keeps the saved accounts
 	// signed in, so two never refresh one sign-in at once
@@ -581,7 +583,11 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	// Count the same masked prompt that generation sends to the vendor.
 	w, body, unmask := redacted(w, body)
 	defer unmask()
-	p, model, ok := provider.Resolve(unprefixed(model))
+	id := unprefixed(model)
+	if sid, ok := provider.AutoStandIn(id); ok {
+		id = sid
+	}
+	p, model, ok := provider.Resolve(id)
 	s.countOn(w, r, p, model, ok, body)
 }
 
@@ -802,7 +808,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	who, agent := callerOf(r), agentOf(r)
 	metadata := requestSessionMetadata(r.Header, body)
 	call := Call{Time: start, From: from, Model: unprefixed(modelOf(body)), Agent: who.agent, Via: who.via, Kind: requestCallKind(r.Header, metadata),
-		RequestBody: requestBody, RequestTruncated: requestTruncated, wire: archiving(r, capture, start)}
+		RequestBody: requestBody, RequestTruncated: requestTruncated, wire: archiving(r, capture, start, body)}
+	defer discardArchive(capture)
 	if call.Kind == "web_search" {
 		call.For = searchFor(r.Context())
 	}
@@ -818,7 +825,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.Millis = time.Since(start).Milliseconds()
 		s.record(call)
 		rec := usage.Record{Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Model: call.Model, Requested: call.Model,
-			Millis: call.Millis, Status: call.Status, Rejected: true, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind, Endpoint: endpointOf(r, from, "")}
+			Millis: call.Millis, Status: call.Status, Rejected: true, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind, Endpoint: endpointOf(r, from, ""), Archive: call.archiveName()}
 		failedWith(&rec, call.Status, call.Error, "")
 		appendUsage(r, rec)
 	}
@@ -830,6 +837,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		asked = desktopTurn(asked, body)
 	}
 	if id, ok := provider.GroupFor(asked); ok {
+		asked = id
+	} else if id, ok := provider.AutoStandIn(asked); ok {
+		// a group magpie found, while the user has those off: its model
+		// from one provider, rather than refused
 		asked = id
 	} else if m := standIn(agent, asked); m != "" {
 		asked = m
@@ -960,6 +971,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	} else {
 		cands, pl = s.plan(p, model, from)
 	}
+	if len(cands) == 0 && len(pl.left) > 0 && !slices.ContainsFunc(pl.left, func(w Weighed) bool { return !w.Barred }) {
+		// every account or key there is was set not to serve the model
+		call.Status, call.Error = 403, "every account barred"
+		writeError(w, from, 403, barredError(call.Model, pl.left))
+		turnedAway()
+		return
+	}
 	if len(cands) == 0 {
 		call.Status, call.Error = 404, "no member ready"
 		writeError(w, from, 404, fmt.Sprintf("none of %s's models is ready", call.Model))
@@ -1071,6 +1089,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		hw := newHoldWriter(w, !last || again < lastRetries || other != nil)
 		hw.thinkingShown = !refusesAfterThinking(c.model)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		model = c.model
 		where = c.p.Where()
 		providerKeyID, providerKeyName = "", ""
 		if c.p.Account == nil && c.p.Key != "" {
@@ -1141,7 +1160,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			held, call.Status, call.Error = true, http.StatusForbidden, said
 			writeError(hw, from, call.Status, said)
 		} else {
-			call.Status, call.Error = s.attempt(hw, r, from, c.p, c.model, attemptBody, &call)
+			// a stream that fails before anything is said is let go at
+			// once (hw.stop), not read on until the vendor hangs up
+			ctx, stop := context.WithCancel(r.Context())
+			hw.stop = stop
+			call.Status, call.Error = s.attempt(hw, r.WithContext(ctx), from, c.p, c.model, attemptBody, &call)
+			stop()
 		}
 		hw.settle()
 		if hw.failure != 0 { // the stream failed before any of it was sent
@@ -1225,7 +1249,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 					CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Effort: sent, Millis: time.Since(began).Milliseconds(), Status: call.Status,
 					TTFT: try.TTFT, FirstText: try.FirstText, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
-					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To)}
+					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To), Archive: call.archiveName()}
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 				appendUsage(r, rec)
 			}
@@ -1331,7 +1355,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		} else {
 			hw.release()
 		}
-		model = c.model
 		if call.Status < 400 {
 			servedCandidate(c, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
 			// a compaction a rule sent to a model of its own leaves the
@@ -1383,7 +1406,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Effort: sent, Millis: call.Millis, Status: call.Status,
 			TTFT: call.TTFT, FirstText: call.FirstText, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
-			RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To)}
+			RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To), Archive: call.archiveName()}
 		failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 		appendUsage(r, rec)
 	}
@@ -1586,7 +1609,8 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		}
 	}
 	if p.IsOpenCode() {
-		req.Header.Set("x-opencode-session", conversationID(in, body))
+		// as OpenCode itself sends it, which Zen's free tier asks for
+		provider.OpenCodeClient(req.Header, conversationID(in, body))
 	}
 	if p.Account != nil && p.Account.Agent == "codex" {
 		// what Codex says about the request goes on as codexUpstream
@@ -1842,6 +1866,10 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if proto == provider.Chat && sse {
 		tidy = &chatTidy{}
 	}
+	var whole *chatWhole
+	if proto == provider.Chat && !sse && strings.Contains(res.Header.Get("Content-Type"), "json") {
+		whole = &chatWhole{}
+	}
 	var search *searchTidy
 	if searchFn && sse {
 		search = &searchTidy{}
@@ -1859,6 +1887,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			out := buf[:n]
 			if tidy != nil {
 				out = tidy.write(out)
+			}
+			if whole != nil {
+				out = whole.write(out)
 			}
 			if search != nil {
 				out = search.write(out)
@@ -1881,6 +1912,13 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if tidy != nil {
 		w.Write(tidy.flush())
 	}
+	if whole != nil {
+		out := whole.flush()
+		if spaces != nil {
+			out = spaces.write(out)
+		}
+		w.Write(out)
+	}
 	if search != nil {
 		out := search.flush()
 		if spaces != nil {
@@ -1901,7 +1939,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		var failed string
 		switch {
 		case rerr != nil && rerr != io.EOF:
-			failed = p.Name + ": " + rerr.Error()
+			failed = cutMidReply(p.Name, rerr)
 		case proto == provider.Anthropic || proto == provider.Responses:
 			failed = p.Name + ": the reply ended before it was complete"
 		}
@@ -1914,6 +1952,14 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 	}
 	return res.StatusCode, "", true
+}
+
+// cutMidReply is what a stream whose read failed mid-reply is ended with:
+// the connection lost, said in so many words. Go's own "unexpected EOF"
+// (every stream on an HTTP/2 connection that dropped ends so) was taken by
+// dsh's pi-ai for an error it doesn't retry, and the turn failed (#470).
+func cutMidReply(name string, err error) string {
+	return name + ": connection lost mid-reply (" + err.Error() + ")"
 }
 
 // streamFailure is an error event ending a stream in proto, as each
@@ -2187,11 +2233,25 @@ func unsupportedOptionalField(fault any, field string) bool {
 		// A proxy can embed the vendor's JSON error in prose. Prefer its
 		// structure to text matching, which could mistake an input echo
 		// or a different parameter's error for a refusal.
-		if i := strings.IndexAny(v, "{["); i >= 0 {
+		rest := v
+		for {
+			i := strings.IndexAny(rest, "{[")
+			if i < 0 {
+				break
+			}
 			var inner any
-			if json.NewDecoder(strings.NewReader(v[i:])).Decode(&inner) == nil {
+			dec := json.NewDecoder(strings.NewReader(rest[i:]))
+			if dec.Decode(&inner) != nil {
+				// not JSON there ([HTTP 400]): look on past the bracket
+				rest = rest[i+1:]
+				continue
+			}
+			if hasOptionalErrorObject(inner) {
 				return unsupportedOptionalField(inner, field)
 			}
+			// [400] can be a status prefix. Look past it for a JSON
+			// error object before falling back to the original prose.
+			rest = rest[i+int(dec.InputOffset()):]
 		}
 		for _, match := range unknownOptionalField.FindAllStringSubmatchIndex(v, -1) {
 			if v[match[2]:match[3]] != field {
@@ -2238,6 +2298,20 @@ func unsupportedOptionalField(fault any, field string) bool {
 		}
 		for _, key := range []string{"error", "message", "detail", "details", "errors", "description", "metadata", "raw"} {
 			if unsupportedOptionalField(v[key], field) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasOptionalErrorObject(fault any) bool {
+	switch v := fault.(type) {
+	case map[string]any:
+		return true
+	case []any:
+		for _, item := range v {
+			if hasOptionalErrorObject(item) {
 				return true
 			}
 		}
@@ -2380,7 +2454,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		if serr != nil && failed == "" {
 			// the upstream died mid-reply: say so in the client's own
 			// protocol instead of finishing as if all went well
-			failed = p.Name + ": " + serr.Error()
+			failed = cutMidReply(p.Name, serr)
 			enc.event(Event{Kind: KError, Text: failed})
 		}
 		if failed == "" {

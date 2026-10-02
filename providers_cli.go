@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"os"
 	"slices"
 	"strings"
@@ -35,6 +34,8 @@ const providerUsage = `usage:
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+  magpie provider account-models <id> [account|key [ids…|all]]
+                                          the models one account or key alone serves; all: every model the provider has
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [model…]      send a tiny request through each endpoint, or to each model
@@ -237,7 +238,7 @@ func models(args []string) error {
 	if agentID != "" {
 		explainHidden(agentID, hidden)
 	}
-	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
+	fmt.Println(faint.Render("  " + advertisedURL() + "/v1"))
 	return bad
 }
 
@@ -403,6 +404,8 @@ func providerCmd(args []string) error {
 			os.Exit(1)
 		}
 		return nil
+	case "account-models", "account-model":
+		return accountModelsCmd(rest)
 	case "listed":
 		// no: the provider's models leave the list agents see and serve
 		// only through the routing groups they are in
@@ -797,7 +800,7 @@ func keyNote() string {
 	if s := settings.Load(); s.LAN {
 		return "(anything works from this machine; from others, an enabled gateway key — magpie gateway-key add <name>)"
 	}
-	if h, _, err := net.SplitHostPort(gateway.Addr()); err == nil && h != "localhost" && !net.ParseIP(h).IsLoopback() {
+	if gateway.OpenToAnyone() {
 		return "(anything works, from anyone who reaches it — share it from Settings to require a key)"
 	}
 	return "(anything works; the gateway only listens on localhost)"
@@ -823,14 +826,25 @@ func shareLines() []string {
 	return out
 }
 
+// advertisedURL is what the CLIs print for other machines: the public
+// address when MAGPIE_PUBLIC_URL is valid, otherwise the one reached from
+// this machine.
+func advertisedURL() string {
+	if u := gateway.PublicURL(); u != "" {
+		return u
+	}
+	return gateway.URL()
+}
+
 // serve: `magpie serve` — the gateway alone, in the foreground.
 func serve() error {
 	s := gateway.New()
 	go stats.Run(version, "serve")
 	go catalog.KeepFresh() // new models' prices, in a gateway left running
+	public := advertisedURL()
 	fmt.Println(green.Render("●"), "magpie gateway on", bold.Render(gateway.URL()))
-	fmt.Println(muted.Render("  OpenAI  "), gateway.URL()+"/v1/chat/completions", muted.Render("·"), gateway.URL()+"/v1/responses")
-	fmt.Println(muted.Render("  Anthropic"), gateway.URL()+"/v1/messages")
+	fmt.Println(muted.Render("  OpenAI  "), public+"/v1/chat/completions", muted.Render("·"), public+"/v1/responses")
+	fmt.Println(muted.Render("  Anthropic"), public+"/v1/messages")
 	fmt.Println(muted.Render("  key     "), gateway.Token, muted.Render(keyNote()))
 	for _, l := range shareLines() {
 		fmt.Println(l)
@@ -903,6 +917,61 @@ func fetchedFrom(p provider.Provider) string {
 		return h
 	}
 	return p.Name
+}
+
+// accountModelsCmd: `magpie provider account-models <id> [account|key
+// [ids…|all]]` — the models one account or key of a provider alone serves
+// (#474), each account's with none named, all for every one the provider has.
+func accountModelsCmd(rest []string) error {
+	if len(rest) < 1 {
+		return fmt.Errorf("magpie provider account-models <id> [account|key [model ids…|all]]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 2 {
+		ms := rest[2:]
+		if len(ms) == 1 && (ms[0] == "all" || ms[0] == "-") {
+			ms = nil
+		}
+		if err := provider.SetAccountModels(p.ID, rest[1], ms); err != nil {
+			return err
+		}
+	}
+	refs := p.AccountRefs()
+	if len(rest) > 1 {
+		ref, _, err := provider.AccountModelsOf(p.ID, rest[1])
+		if err != nil {
+			return err
+		}
+		refs = []string{ref}
+	}
+	if len(refs) == 0 {
+		fmt.Println(muted.Render(p.Name + " has no account or key"))
+		return nil
+	}
+	label := map[string]string{}
+	for _, k := range p.KeyList() {
+		if k.Name != "" {
+			label[k.ID] = k.Name + " " + muted.Render(k.Masked+" · "+k.ID)
+		} else {
+			label[k.ID] = k.Masked + " " + muted.Render(k.ID)
+		}
+	}
+	for _, r := range refs {
+		name := r
+		if l, ok := label[r]; ok {
+			name = l
+		}
+		_, ms, _ := provider.AccountModelsOf(p.ID, r)
+		if len(ms) == 0 {
+			fmt.Println(name, muted.Render("· every model "+p.Name+" serves"))
+		} else {
+			fmt.Println(name, "· only", strings.Join(ms, ", "))
+		}
+	}
+	return nil
 }
 
 // printMoved says which agents a change moved off models it stopped

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/plugin"
@@ -69,6 +70,9 @@ type pluginEntryJSON struct {
 	Providers []string `json:"providers"`         // the names of those it signs in to
 	Version   string   `json:"version,omitempty"` // installed
 	Latest    string   `json:"latest,omitempty"`  // on npm, when the market asked
+	// Package is the package installed from a git repository, which its
+	// own package.json names
+	Package string `json:"package,omitempty"`
 	// Moved are the built-in subscriptions moved onto it, which go back
 	// to themselves when it is removed or turned off
 	Moved []string `json:"moved"`
@@ -111,10 +115,18 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 			}
 		}
 	}
+	// npm's newest, as it said last: asking it again is /api/plugins/npm's
+	known := plugin.InfoCached(npmNames(l.Plugins))
 	for _, e := range l.Plugins {
 		j := pluginEntryJSON{Entry: e, Error: errs[e.Spec], Providers: names[e.Spec], Version: plugin.Installed(e.Spec)}
+		if npmPlugin(e.Spec) {
+			j.Latest = known[plugin.Name(e.Spec)].Version
+		}
 		if j.Providers == nil {
 			j.Providers = []string{}
+		}
+		if plugin.IsGit(e.Spec) {
+			j.Package = plugin.Name(e.Spec)
 		}
 		if u, ok := plugin.LastUpdated(plugin.Name(e.Spec), time.Now().Add(-autoUpdatedFor)); ok && !plugin.IsPath(e.Spec) {
 			j.AutoUpdated = &u
@@ -128,6 +140,42 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	return s
 }
 
+// npmPlugin is whether npm has the plugin spec's versions: a plugin from a
+// git repository is that repository's, whatever npm has under its name,
+// and one from a folder is the folder's.
+func npmPlugin(spec string) bool { return !plugin.IsPath(spec) && !plugin.IsGit(spec) }
+
+func npmNames(es []plugin.Entry) []string {
+	out := []string{}
+	for _, e := range es {
+		if npmPlugin(e.Spec) {
+			out = append(out, plugin.Name(e.Spec))
+		}
+	}
+	return out
+}
+
+// pluginListings are the plugins magpie suggests, each with what npm said
+// of it last (asking npm again is /api/plugins/npm's), so Discover is drawn
+// without waiting on npm.
+func pluginListings(ctx context.Context) []pluginListingJSON {
+	ls := plugin.Market(ctx)
+	names := make([]string, 0, len(ls))
+	for _, l := range ls {
+		names = append(names, l.Package)
+	}
+	known := plugin.InfoCached(names)
+	out := make([]pluginListingJSON, 0, len(ls))
+	for _, l := range ls {
+		j := pluginListingJSON{Listing: l}
+		if n, ok := known[l.Package]; ok {
+			j.NPM = &n
+		}
+		out = append(out, j)
+	}
+	return out
+}
+
 // pluginMarketJSON is the plugin market: the plugins magpie suggests, what npm
 // says of each, and those added.
 type pluginMarketJSON struct {
@@ -137,7 +185,7 @@ type pluginMarketJSON struct {
 
 type pluginListingJSON struct {
 	plugin.Listing
-	NPM plugin.NPM `json:"npm"`
+	NPM *plugin.NPM `json:"npm,omitempty"` // none while npm hasn't been asked
 }
 
 func pluginMarketState(ctx context.Context, w Windows) pluginMarketJSON {
@@ -152,17 +200,20 @@ func pluginMarketState(ctx context.Context, w Windows) pluginMarketJSON {
 	}
 	<-done
 	for _, e := range st.Plugins {
-		if !plugin.IsPath(e.Spec) {
+		if npmPlugin(e.Spec) {
 			names = append(names, plugin.Name(e.Spec))
 		}
 	}
 	info := plugin.Info(ctx, names)
 	m := pluginMarketJSON{Listings: []pluginListingJSON{}, State: st}
 	for _, l := range ls {
-		m.Listings = append(m.Listings, pluginListingJSON{Listing: l, NPM: info[l.Package]})
+		n := info[l.Package]
+		m.Listings = append(m.Listings, pluginListingJSON{Listing: l, NPM: &n})
 	}
 	for i, e := range m.State.Plugins {
-		m.State.Plugins[i].Latest = info[plugin.Name(e.Spec)].Version
+		if !plugin.IsGit(e.Spec) {
+			m.State.Plugins[i].Latest = info[plugin.Name(e.Spec)].Version
+		}
 	}
 	return m
 }
@@ -172,6 +223,21 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/plugins/updates", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, plugin.PendingUpdates())
 	})
+	// the market in parts, as the page draws it (#488): the plugins
+	// suggested, at once, then what npm says of the packages named
+	mux.HandleFunc("GET /api/plugins/listings", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, map[string]any{"listings": pluginListings(r.Context())})
+	})
+	mux.HandleFunc("GET /api/plugins/npm", func(rw http.ResponseWriter, r *http.Request) {
+		names := []string{}
+		for _, n := range strings.Split(r.URL.Query().Get("names"), ",") {
+			if n = strings.TrimSpace(n); n != "" && len(names) < 100 {
+				names = append(names, n)
+			}
+		}
+		writeJSON(rw, map[string]any{"npm": plugin.Info(r.Context(), names)})
+	})
+	// the whole market at once, npm's answers and all
 	mux.HandleFunc("GET /api/plugins/market", func(rw http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()

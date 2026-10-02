@@ -53,6 +53,7 @@ type Settings struct {
 	// environment and then the system, "direct" uses none, anything else
 	// is the proxy (http://, https:// or socks5://; host:port means http).
 	Proxy string `json:"proxy,omitempty"`
+	OTel  OTel   `json:"otel,omitempty"`
 	// Redact keeps secrets in what agents send (API keys, private keys,
 	// tokens, passwords) from the vendors behind magpie: they go as
 	// placeholders, and come back as they were. RedactPersonal does the same
@@ -74,6 +75,9 @@ type Settings struct {
 	// bodies both ways, secrets taken out — in the S3 bucket sync keeps
 	// its backup in (gateway/archive.go), for looking into a request later.
 	RequestArchive bool `json:"requestArchive,omitempty"`
+	// RequestArchiveMaxMB is how much of each body the archive keeps, in
+	// MiB: 0 for 32, at most 1024 (#447)
+	RequestArchiveMaxMB int `json:"requestArchiveMaxMB,omitempty"`
 	// CodexWarmup starts a ChatGPT account's next window as soon as the
 	// last one resets, with one tiny request, so it counts from then (a
 	// Codex window starts at its first use): "" off, "week" the weekly
@@ -108,6 +112,12 @@ type Settings struct {
 	// puts it in as it quits, and Settings' version row still offers it.
 	NoUpdatePill bool   `json:"noUpdatePill,omitempty"`
 	UpdateSkip   string `json:"updateSkip,omitempty"`
+	// NoAutoUpdate stops magpie asking for a newer version by itself, and
+	// so downloading one (#472): only Settings' Check, or magpie update,
+	// asks then. UpdateEvery is how often it asks otherwise, in minutes:
+	// one of UpdateEveries, 0 for every six hours.
+	NoAutoUpdate bool `json:"noAutoUpdate,omitempty"`
+	UpdateEvery  int  `json:"updateEvery,omitempty"`
 	// Vision is the model that describes an image to a model that can't see
 	// it: a model's id (provider/model, group/<id>), "off" to turn such an
 	// image away, or empty for one magpie picks (see gateway.seer).
@@ -341,6 +351,8 @@ var (
 	Warmups = []string{"", "week", "all"}
 	// TrayEvery are TrayUsageEvery's values, in minutes.
 	TrayEvery = []int{1, 3, 5, 10, 30}
+	// UpdateEveries are UpdateEvery's values, in minutes.
+	UpdateEveries = []int{30, 60, 360, 1440}
 	// TextSizes are TextSize's values, in percent. None is under 100: the
 	// webviews' zoom on Windows and Linux (Wails' SetZoom) goes no lower.
 	TextSizes = []int{100, 110, 125, 150}
@@ -412,6 +424,16 @@ func CarryPerModel(in, cur *Settings) {
 	for _, f := range perModelFields(dst.Type()) {
 		dst.FieldByIndex(f.Index).Set(src.FieldByIndex(f.Index))
 	}
+}
+
+// KeepOwn puts back cur's settings that are this computer's own, which a
+// sync or a restored backup never brings from another: the window's size,
+// the proxy, the Dock, and what the menu bar or tray shows beside magpie's
+// icon (yoooo on Discord: usage turned off on a Mac came back from a
+// Windows box that shows it).
+func (s *Settings) KeepOwn(cur Settings) {
+	s.Window, s.Proxy, s.Dock, s.DockWindow = cur.Window, cur.Proxy, cur.Dock, cur.DockWindow
+	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos
 }
 
 // RenamePerModel moves what the user said of a provider's models to the id
@@ -525,6 +547,9 @@ func Save(s Settings) error {
 	if !slices.Contains(TrayEvery, s.TrayUsageEvery) {
 		return fmt.Errorf("the menu bar's usage is refreshed every %v minutes, not %d", TrayEvery, s.TrayUsageEvery)
 	}
+	if !slices.Contains(UpdateEveries, s.UpdateEvery) {
+		return fmt.Errorf("magpie checks for updates every %v minutes, not %d", UpdateEveries, s.UpdateEvery)
+	}
 	if s.UsageAlert < 0 || s.UsageAlert > 100 {
 		return fmt.Errorf("a usage alert is at a percentage from 1 to 100, or 0 for off, not %d", s.UsageAlert)
 	}
@@ -533,6 +558,10 @@ func Save(s Settings) error {
 	}
 	if !slices.Contains(TextSizes, s.TextSize) {
 		return fmt.Errorf("text size must be one of %v percent, not %d", TextSizes, s.TextSize)
+	}
+	s.OTel.Endpoint = strings.TrimRight(strings.TrimSpace(s.OTel.Endpoint), "/")
+	if err := s.OTel.Check(); err != nil {
+		return err
 	}
 	s.Proxy = strings.TrimSpace(s.Proxy)
 	if err := CheckProxy(s.Proxy); err != nil {
@@ -568,7 +597,13 @@ func Save(s Settings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(Path(), append(b, '\n'), 0o644)
+	// Restrict existing settings without changing the owner's permissions.
+	if fi, err := os.Stat(Path()); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(Path(), fi.Mode().Perm()&0o700); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(Path(), append(b, '\n'), 0o600)
 }
 
 func (s Settings) normal() Settings {
@@ -592,6 +627,9 @@ func (s Settings) normal() Settings {
 	}
 	if s.TrayUsageEvery == 0 {
 		s.TrayUsageEvery = 3
+	}
+	if s.UpdateEvery == 0 {
+		s.UpdateEvery = 360
 	}
 	if s.TextSize == 0 {
 		s.TextSize = 100

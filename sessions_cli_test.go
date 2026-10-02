@@ -49,8 +49,10 @@ func sessionsHome(t *testing.T) time.Time {
 		return catalog.Price{}, false
 	}
 	t.Cleanup(func() {
-		time.Local, sessions.PriceOf = oldZone, oldPrice
+		// the index is written behind the page: let that write finish before
+		// the zone it reads (a stat of the file it writes) goes back
 		sessions.Reset()
+		time.Local, sessions.PriceOf = oldZone, oldPrice
 	})
 	sessions.Reset()
 	return time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)

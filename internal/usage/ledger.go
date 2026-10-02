@@ -51,6 +51,25 @@ type Filter struct {
 	Provider  string // a provider's id, as the ledger's rows have it
 	Failed    bool
 	Query     string
+	// Computer narrows to the calls of one computer (#542): ThisComputer,
+	// OtherComputers, or another's id; "" is every computer's
+	Computer string
+}
+
+// OtherComputers is the Filter.Computer of every other computer's calls.
+const OtherComputers = "others"
+
+// computer is whether r is of the computers Computer picks.
+func (f Filter) computer(r Record) bool {
+	switch f.Computer {
+	case "":
+		return true
+	case ThisComputer:
+		return r.Computer == ""
+	case OtherComputers:
+		return r.Computer != ""
+	}
+	return r.Computer == f.Computer
 }
 
 func (f Filter) keeps(r Record) bool {
@@ -67,6 +86,9 @@ func (f Filter) keeps(r Record) bool {
 		return false
 	}
 	if f.Provider != "" && r.Provider != f.Provider {
+		return false
+	}
+	if !f.computer(r) {
 		return false
 	}
 	if f.Failed && !r.Failed() {
@@ -121,7 +143,7 @@ func LedgerOf(p Period, f Filter) Ledgered {
 	if reader == nil {
 		reader = sessions.Calls
 	}
-	rows, sum, agents, providers := ledgerWith(since, f, Load(gatewaySince), reader(since))
+	rows, sum, agents, providers := ledgerWithShared(since, f, Load(gatewaySince), reader(since), sharedRecords(since))
 	return Ledgered{rows, sum, agents, providers}
 }
 
@@ -230,6 +252,12 @@ func gatewayMatches(recs []Record, logs []sessions.Call) map[int]bool {
 }
 
 func ledgerWith(since time.Time, f Filter, recs []Record, logs []sessions.Call) (rows []Row, sum Totals, agents, providers []string) {
+	return ledgerWithShared(since, f, recs, logs, nil)
+}
+
+// ledgerWithShared is ledgerWith with the calls other computers made (#542),
+// priced and judged here as this computer's are.
+func ledgerWithShared(since time.Time, f Filter, recs []Record, logs []sessions.Call, others []SharedCall) (rows []Row, sum Totals, agents, providers []string) {
 	renamed := provider.Renamed()
 	// the upstream names in force now, read once for the lot: a row is
 	// judged by the names standing today, which is what Ledger says, and
@@ -285,6 +313,16 @@ func ledgerWith(since time.Time, f Filter, recs []Record, logs []sessions.Call) 
 		r.SessionOfficialLogin = identities.officialLogin(c, r.SessionAccount)
 		r.SessionProvider = c.Upstream
 		add(r, priceOf(r), "log")
+	}
+	for _, c := range others {
+		r := c.Record
+		if !since.IsZero() && r.Time.Before(since) {
+			continue
+		}
+		if id, ok := renamed[r.Provider]; ok {
+			r.Provider = id
+		}
+		add(r, priceOf(r), c.Source)
 	}
 	// the two logs, by when each call began
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Time.After(rows[j].Time) })
@@ -473,6 +511,11 @@ func (r Row) key(by string) string {
 		return r.Provider
 	case "agent":
 		return r.Agent
+	case "computer":
+		if r.Computer == "" {
+			return ThisComputer
+		}
+		return r.Computer
 	}
 	return r.Model
 }

@@ -178,13 +178,11 @@ type fxJSON struct {
 	Stale bool       `json:"stale"`
 }
 
-// currentFX asks internal/fx for the rate, bounded so a slow or absent
-// network never holds up a page's worth of state; its own cache makes this
-// return at once except right after each TTL (see internal/fx).
+// currentFX is the rate known now, never waited for: a stale one is asked
+// for behind it and shown on the next look (#541: the state waited up to
+// 4s on the network after each TTL, at every morning's start-up).
 func currentFX() fxJSON {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	r := fx.Get(ctx)
+	r := fx.Soon()
 	out := fxJSON{Rate: r.CNYPerUSD, Stale: r.Stale()}
 	if !r.At.IsZero() {
 		at := r.At

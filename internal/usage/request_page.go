@@ -36,6 +36,12 @@ type RequestPage struct {
 	Bucket            string
 	Series            []SeriesPoint
 	By                map[string][]Share
+	// Computers are the rows told apart by the computer they were made on,
+	// ThisComputer's and each other's by id, of the rows without the
+	// filter's computer, and Names what the others are called: none when no
+	// other computer's calls were brought here by sync (#542)
+	Computers []Share
+	Names     map[string]string
 }
 
 type packedRow struct {
@@ -59,6 +65,8 @@ type rowChunk struct {
 	Used      uint64
 	Count     int
 	Latest    time.Time
+	// Computer is the other computer whose day this is (#542), by id
+	Computer string
 }
 
 // rowMsg is the Text of a row's Claude message id, after rowText's
@@ -118,6 +126,7 @@ func (c *rowChunk) row(i int) Row {
 	for i, s := range rowText(&r) {
 		*s = c.Strings[p.Text[i]]
 	}
+	r.Computer = c.Computer
 	return r
 }
 
@@ -227,6 +236,10 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	fmt.Fprint(h, meta, snapshot.version, time.Now().Format("2006-01-02 MST"))
 	for _, s := range sources {
 		fmt.Fprintf(h, "%s:%d:%d;", s.Path, s.Size, s.Modified.UnixNano())
+	}
+	days, someShared := sharedSources(time.Time{})
+	for _, s := range days {
+		fmt.Fprintf(h, "%s:%d:%d;", s.path, s.size, s.mod.UnixNano())
 	}
 	key := fmt.Sprintf("%x", h.Sum(nil))
 	root := Path() + "|" + catalog.CachePath()
@@ -338,12 +351,61 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 		}
 		chunks = append(chunks, c)
 	}
+	// the other computers' days (#542), a chunk each, read again only when
+	// sync brought a new copy
+	var others []*rowChunk
+	var renames map[string]string
+	from := ""
+	if !since.IsZero() {
+		from = since.AddDate(0, 0, -1).Format(time.DateOnly)
+	}
+	for _, s := range days {
+		on[s.path] = true
+		if s.day < from {
+			continue
+		}
+		cached := idx.chunks[s.path]
+		c := cached.unpack()
+		reused := c != nil && c.Source.Size == s.size && c.Source.Modified.Equal(s.mod)
+		if !reused {
+			d, _ := readShared(s.path)
+			if renames == nil {
+				renames = provider.Renamed()
+			}
+			c = &rowChunk{Source: sessions.CallSource{Path: s.path, Size: s.size, Modified: s.mod}, Computer: s.computer, Rows: make([]packedRow, 0, len(d.Calls))}
+			for i, call := range d.Calls {
+				r := call.Record
+				r.Computer = ""
+				if id, ok := renames[r.Provider]; ok {
+					r.Provider = id
+				}
+				c.add(priceRow(r, call.Source), "", int64(i), false)
+			}
+			c.Bytes -= int64(32 * len(c.Strings))
+			c.dict = nil
+		}
+		next := *c
+		c = &next
+		c.Used = idx.tick
+		if reused {
+			kept := *cached
+			kept.Used = idx.tick
+			idx.chunks[s.path] = &kept
+		} else {
+			idx.chunks[s.path] = c.pack()
+		}
+		others = append(others, c)
+	}
 	for path := range idx.chunks {
 		if !on[path] {
 			delete(idx.chunks, path)
 		}
 	}
-	page := buildRequestBlocks(p, f, offset, limit, gateways, chunks)
+	var names map[string]string
+	if someShared {
+		names = sharedNames()
+	}
+	page := buildRequestBlocks(p, f, offset, limit, gateways, chunks, others, names)
 	shared.Lock()
 	defer shared.Unlock()
 	// A query for an older filesystem snapshot may finish after a newer one.
@@ -578,14 +640,15 @@ func sharesOf(m map[string]*Share) []Share {
 	return out
 }
 func buildRequestPage(p Period, f Filter, offset, limit int, gateway *rowChunk, chunks []*rowChunk) RequestPage {
-	return buildRequestBlocks(p, f, offset, limit, []*rowChunk{gateway}, chunks)
+	return buildRequestBlocks(p, f, offset, limit, []*rowChunk{gateway}, chunks, nil, nil)
 }
 
-func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks []*rowChunk) RequestPage {
+// Shared days are never matched to this computer's gateway or session calls.
+func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks, others []*rowChunk, names map[string]string) RequestPage {
 	skip := visibleLocal(chunks)
 	since := p.Since(time.Now())
 	matched := matchedBlocks(gateways, chunks, skip, since, true)
-	all := append(slices.Clone(gateways), chunks...)
+	all := append(append(slices.Clone(gateways), chunks...), others...)
 	visit := func(fn func(rowRef, Row)) {
 		for _, c := range all {
 			for i, pr := range c.Rows {
@@ -600,6 +663,7 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks 
 	out := RequestPage{Rows: []Row{}, Agents: []string{}, Providers: []string{}, By: map[string][]Share{}}
 	agents, providers := map[string]bool{}, map[string]bool{}
 	callers := map[string]*Group{}
+	computers := map[string]*Share{}
 	groups := map[string]map[string]*Share{}
 	seriesGroups := map[string]map[string]*Share{}
 	for _, d := range Dimensions {
@@ -652,6 +716,16 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks 
 		if r.IsRejected() {
 			return
 		}
+		if g := f; names != nil {
+			g.Computer = ""
+			if g.keeps(r.Record) {
+				k := r.key("computer")
+				if computers[k] == nil {
+					computers[k] = &Share{ID: k}
+				}
+				computers[k].addRow(r)
+			}
+		}
 		for _, d := range Dimensions {
 			g := f
 			if d == "provider" {
@@ -699,6 +773,7 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks 
 	for _, d := range Dimensions {
 		out.By[d] = sharesOf(groups[d])
 	}
+	out.Computers, out.Names = computerShares(computers, names)
 	var base []Point
 	chartSince := since
 	chartSince, out.Bucket, base = timeline(p, time.Now(), first)
@@ -776,7 +851,30 @@ func pageFromLedger(p Period, f Filter, offset, limit int, all Ledgered) Request
 		}
 		out.By[d] = Breakdown(all.Filtered(g).Rows, d)
 	}
+	if names := sharedNames(); len(names) > 0 {
+		g := f
+		g.Computer = ""
+		computers := map[string]*Share{}
+		for _, s := range Breakdown(all.Filtered(g).Rows, "computer") {
+			computers[s.ID] = &s
+		}
+		out.Computers, out.Names = computerShares(computers, names)
+	}
 	return out
+}
+
+// computerShares are the computers' shares, this one and every other kept
+// here among them though it made no call in the period; none without names.
+func computerShares(m map[string]*Share, names map[string]string) ([]Share, map[string]string) {
+	if names == nil {
+		return nil, nil
+	}
+	for _, id := range append([]string{ThisComputer}, slices.Collect(maps.Keys(names))...) {
+		if m[id] == nil {
+			m[id] = &Share{ID: id}
+		}
+	}
+	return sharesOf(m), names
 }
 
 // Caller choices cover the period, not just the current page or selected key.

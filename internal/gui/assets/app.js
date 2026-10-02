@@ -8417,7 +8417,7 @@ if (mode === "panel") {
 // the chart then tells its models apart. A click on someone in the ranking
 // picks them; "Open Usage" takes the window to their requests.
 let panelUse = null; // the answer for the period, and provider, shown
-let panelUsePeriod = "today", panelUseProvider = "", panelUseMetric = "tokens";
+let panelUsePeriod = "today", panelUseProvider = "", panelUseMetric = "tokens", panelUseComputer = "";
 try {
   const p = localStorage.getItem("magpie.panelUsePeriod"), m = localStorage.getItem("magpie.panelUseMetric");
   if (["today", "7d", "30d"].includes(p)) panelUsePeriod = p;
@@ -8435,6 +8435,7 @@ function loadPanelUse() {
   if (panelUseFlight) { panelUseQueued = true; return panelUseFlight; }
   const q = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
   if (panelUseProvider) q.set("provider", panelUseProvider);
+  if (panelUseComputer) q.set("computer", panelUseComputer);
   const want = q.toString();
   panelUseAt = performance.now();
   // what is shown stays, dimmed, till the answer comes: the panel doesn't
@@ -8445,6 +8446,7 @@ function loadPanelUse() {
       const l = await api("usage/requests?" + want);
       const now = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
       if (panelUseProvider) now.set("provider", panelUseProvider);
+      if (panelUseComputer) now.set("computer", panelUseComputer);
       if (now.toString() !== want) return; // another period or provider was picked meanwhile
       panelUse = l;
       $("#panelUsage").classList.remove("pu-loading");
@@ -8504,10 +8506,16 @@ function renderPanelUse() {
   const opts = (l?.providers || []).map((p) => ({ v: p.id, name: t(p.name), note: "" }));
   if (panelUseProvider && l && !opts.some((o) => o.v === panelUseProvider)) panelUseProvider = "";
   sessPick(pick, "All providers", panelUseProvider, opts, "Provider", (id) => { panelUseProvider = id; renderPanelUse(); loadPanelUse().catch(() => {}); });
+  // the computers whose usage sync shares (#542): none, and it isn't there
+  const comp = el("button", "sess-pick");
+  comp.type = "button";
+  const copts = computerOpts(l?.computers);
+  if (panelUseComputer && l && !copts.some((o) => o.v === panelUseComputer)) panelUseComputer = "";
+  sessPick(comp, "All computers", panelUseComputer, copts, "Computer", (id) => { panelUseComputer = id; renderPanelUse(); loadPanelUse().catch(() => {}); });
   const open = el("button", "text", t("Open Usage"));
   open.type = "button";
   open.onclick = (e) => {
-    api("window/main?" + new URLSearchParams({ view: "usage", tab: "requests", ...(panelUseProvider ? { provider: panelUseProvider } : {}) }), {});
+    api("window/main?" + new URLSearchParams({ view: "usage", tab: "requests", ...(panelUseProvider ? { provider: panelUseProvider } : {}), ...(panelUseComputer ? { computer: panelUseComputer } : {}) }), {});
     e.currentTarget.blur();
   };
   // as the window's Usage has it: what is shown read again now
@@ -8522,7 +8530,7 @@ function renderPanelUse() {
     b.classList.add("spin");
     loadPanelUse().catch(() => {}).finally(() => setTimeout(() => $("#panelUsage .pu-again")?.classList.remove("spin"), 300));
   };
-  bar.append(per, pick, el("span", "grow"), again, open);
+  bar.append(per, ...(copts.length ? [comp] : []), pick, el("span", "grow"), again, open);
   const out = [bar, el("p", "usage-note", t("Gateway and session-log calls; local rejections excluded from totals."))];
   if (!l) {
     out.push(el("span", "skeleton pu-sk"), el("span", "skeleton pu-sk"));
@@ -9204,7 +9212,18 @@ function renderUsage() {
 // server pages it (/api/usage/requests) and saves it whole as CSV.
 
 let ledger = null; // the page shown: { rows, offset, total, agents, …totals }
-let ledOffset = 0, ledAgent = "", ledProvider = "", ledCallerKey = "", ledFailed = false, ledQuery = "", ledModel = "", ledRoute = 0;
+let ledOffset = 0, ledAgent = "", ledProvider = "", ledCallerKey = "", ledFailed = false, ledQuery = "", ledModel = "", ledRoute = 0, ledComputer = "";
+
+// computerOpts are the Computer filter's choices: this computer, the others
+// together, and each other one, as sync shares their usage (#542); none
+// while no other computer's is here.
+function computerOpts(cs) {
+  if (!cs?.length) return [];
+  const others = cs.filter((c) => c.id !== "this");
+  return [{ v: "this", name: t("This computer"), note: "" },
+    ...(others.length > 1 ? [{ v: "others", name: t("Other computers"), note: "" }] : []),
+    ...others.map((c) => ({ v: c.id, name: c.name || c.id, note: "" }))];
+}
 const LED_PAGE = 100;
 // Remember the chart metric; start each app load split by model.
 let ledMetric = "tokens", ledSplit = "model";
@@ -9215,10 +9234,10 @@ try {
 
 let ledRouteInfo = null, ledBeforeRoute = null;
 window.openUsageRoute = (route) => {
-  if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledAgent, ledProvider, ledCallerKey, ledFailed, ledQuery, ledModel };
+  if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledAgent, ledProvider, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer };
   ledRoute = route.id;
   ledRouteInfo = route;
-  ledOffset = 0; ledAgent = ""; ledProvider = ""; ledCallerKey = ""; ledFailed = false; ledQuery = ""; ledModel = "";
+  ledOffset = 0; ledAgent = ""; ledProvider = ""; ledCallerKey = ""; ledFailed = false; ledQuery = ""; ledModel = ""; ledComputer = "";
   $("#ledQ").value = "";
   period = "all";
   usageTab = "requests";
@@ -9230,6 +9249,7 @@ function ledParams(extra) {
   const q = new URLSearchParams({ period });
   if (ledAgent) q.set("agent", ledAgent);
   if (ledProvider) q.set("provider", ledProvider);
+  if (ledComputer) q.set("computer", ledComputer);
   if (ledCallerKey) q.set("callerKey", ledCallerKey);
   if (ledRoute) q.set("route", ledRoute);
   if (ledFailed) q.set("failed", "1");
@@ -9295,7 +9315,7 @@ function ledServed(r) {
 // a request that failed: told by its status, or, for one read from a
 // session file, which records none, by the error that ended it
 const ledFailed_ = (r) => r.status >= 400 || !!r.err;
-const ledKey = (r) => [r.t, r.agent, r.model, r.rid, r.session].join("|");
+const ledKey = (r) => [r.t, r.agent, r.model, r.rid, r.session, r.computer || ""].join("|");
 const ledOpen = new Set(); // the rows opened, kept across a refresh
 
 // what is known of one request beyond its row: the id its vendor gave it,
@@ -9311,6 +9331,7 @@ function ledDetail(r, cols) {
     add("Error type", r.err_type, "bad");
     add(r.source === "log" ? "Error" : "Upstream said", r.err, "said");
   }
+  if (r.computerName) add("Computer", r.computerName);
   add("Request ID", r.rid);
   add("Endpoint", r.ep);
   add("Session ID", r.session);
@@ -9322,7 +9343,7 @@ function ledDetail(r, cols) {
   if (r.pricing_model) add("API price reference", r.pricing_model);
   // with the archive on, a request it has no copy of says so: from before
   // it was on, or not through the gateway
-  if (!r.archive && (providers?.gateway?.archive?.on ?? state.settings?.requestArchive)) add("Request archive", t("Not archived"), "muted");
+  if (!r.archive && !r.computer && (providers?.gateway?.archive?.on ?? state.settings?.requestArchive)) add("Request archive", t("Not archived"), "muted");
   if (r.source === "log") add("Data source", t("Read from the agent's session file. The account is shown only when local metadata identifies it; no service provider is inferred."), "muted");
   const tr = el("tr", "led-detail");
   const td = el("td");
@@ -9336,11 +9357,17 @@ function ledDetail(r, cols) {
     draw();
     box.append(ab);
   }
-  // what was said: read from the agent's session file, when the row is opened
+  // what was said: read from the agent's session file, when the row is
+  // opened; one made on another computer has its files there, and sync
+  // brings none of what was said
   const cx = el("div", "led-cx");
-  cx.append(el("p", "cx-none", t("Loading…")));
+  if (r.computer) {
+    cx.append(el("p", "cx-none", t("What was said stays on {computer}: sync shares the usage alone.", { computer: r.computerName || r.computer })));
+  } else {
+    cx.append(el("p", "cx-none", t("Loading…")));
+    ledLoadContent(r).then((c) => { if (cx.isConnected) cx.replaceChildren(ledContentBox(c)); });
+  }
   box.append(cx);
-  ledLoadContent(r).then((c) => { if (cx.isConnected) cx.replaceChildren(ledContentBox(c)); });
   td.append(box);
   tr.append(td);
   return tr;
@@ -9777,7 +9804,10 @@ function renderLedger() {
   const missingAgent = ledAgent && !l.agents.some((a) => a.id === ledAgent);
   const missingProvider = ledProvider && !providers.some((p) => p.id === ledProvider);
   const missingCaller = ledCallerKey && !callers.some((k) => k.id === ledCallerKey);
-  if (missingAgent || missingProvider || missingCaller) {
+  const computers = computerOpts(l.computers);
+  const missingComputer = ledComputer && !computers.some((c) => c.v === ledComputer);
+  if (missingAgent || missingProvider || missingCaller || missingComputer) {
+    if (missingComputer) ledComputer = "";
     if (missingAgent) ledAgent = "";
     if (missingProvider) ledProvider = "";
     if (missingCaller) ledCallerKey = "";
@@ -9802,6 +9832,7 @@ function renderLedger() {
   }
 
   // the filters: the agents with calls in the period, and failures alone
+  sessPick($("#ledComputer"), "All computers", ledComputer, computers, "Computer", (v) => { ledComputer = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledAgent"), "All agents", ledAgent, l.agents.map((a) => ({ v: a.id, name: a.name, note: "" })), "Agent", (v) => { ledAgent = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledProvider"), "All providers", ledProvider, providers.map((p) => ({ v: p.id, name: t(p.name), note: "" })), "Provider", (v) => { ledProvider = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledKey"), "All gateway keys", ledCallerKey, callers.map((k) => ({
@@ -9836,7 +9867,7 @@ function renderLedger() {
   $("#ledRouteClear").setAttribute("aria-label", t("Clear filter"));
   $("#ledRouteClear").onclick = () => {
     ledRoute = 0; ledRouteInfo = null;
-    if (ledBeforeRoute) ({ period, ledOffset, ledAgent, ledProvider, ledCallerKey, ledFailed, ledQuery, ledModel } = ledBeforeRoute);
+    if (ledBeforeRoute) ({ period, ledOffset, ledAgent, ledProvider, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer = "" } = ledBeforeRoute);
     ledBeforeRoute = null;
     $("#ledQ").value = ledQuery;
     loadLedger().catch((e) => status(e.message, "err"));
@@ -9847,7 +9878,7 @@ function renderLedger() {
   const pager = $("#ledPager");
   if (!l.total) {
     wrap.classList.add("none");
-    const filtered = ledRoute || ledAgent || ledProvider || ledCallerKey || ledModel || ledFailed || ledQuery.trim();
+    const filtered = ledRoute || ledAgent || ledProvider || ledComputer || ledCallerKey || ledModel || ledFailed || ledQuery.trim();
     const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
     wrap.replaceChildren(el("div", "led-none", filtered ? t("No requests match these filters.") : t(none)));
     pager.hidden = true;
@@ -9883,7 +9914,9 @@ function renderLedger() {
     const who = el("span", "who");
     // an agent on another computer, whose magpie passed the request on
     const name = r.agentName || r.agent;
-    who.append(icon(r.icon || "generic"), el("span", "", [r.via ? t("{agent} · via {host}", { agent: name, host: r.via }) : name, r.callerKeyLabel || r.callerKeyName].filter(Boolean).join(" · ")));
+    // one made on another computer, whose usage sync brought (#542)
+    const at = r.computerName ? t("{agent} · on {computer}", { agent: name, computer: r.computerName }) : name;
+    who.append(icon(r.icon || "generic"), el("span", "", [r.via ? t("{agent} · via {host}", { agent: at, host: r.via }) : at, r.callerKeyLabel || r.callerKeyName].filter(Boolean).join(" · ")));
     td(who, "", [r.kind, r.session && t("session {id}", { id: r.session })].filter(Boolean).join(" · "));
     td(r.req || "—", "model" + (r.req ? "" : " faint"), r.req || t("Not kept for requests before this version"));
     const local = r.source === "log";
@@ -11742,7 +11775,7 @@ async function renderSync(v) {
   };
   const btn = (label, fn, cls = "text") => { const b = el("button", cls, label); b.onclick = fn; return b; };
   const toggle = (id) => () => { syncOpen = syncOpen === id ? "" : id; renderSync(); };
-  const parts = (ps) => ps.map((p) => t({ providers: "providers", settings: "settings", profiles: "profiles", agents: "agents' models", library: "library" }[p])).join(t(", "));
+  const parts = (ps) => ps.map((p) => t({ providers: "providers", settings: "settings", profiles: "profiles", agents: "agents' models", library: "library", usage: "usage" }[p])).join(t(", "));
 
   // WebDAV or S3
   // off: what it would keep the same, named from the view's toggles as the
@@ -11752,6 +11785,7 @@ async function renderSync(v) {
   const goes = ["settings", "profiles"];
   if (v.agents !== false) goes.push("agents");
   if (v.library !== false) goes.push("library");
+  if (v.usage) goes.push("usage");
   let status = t("Keeps {parts} the same on every computer", {
     parts: t(v.keys === false ? "providers without their API keys" : "providers with their API keys") + t(", ") + parts(goes) });
   const s3 = v.on && v.kind === "s3";
@@ -11763,6 +11797,7 @@ async function renderSync(v) {
       : v.last ? t("Synced {when} · {host}", { when: syncWhen(v.last), host }) : t("Not synced yet · {host}", { host });
     // the other kind's server, kept from before sync moved here
     if (v.other) status += " · " + t("{kind} settings kept", { kind: v.other.kind === "s3" ? "S3" : "WebDAV" });
+    if (!v.error && v.usageError) status += " · " + t("Couldn't share usage: {error}", { error: v.usageError });
   }
   const sub = row(t(s3 ? "S3 sync" : v.on ? "WebDAV sync" : "WebDAV or S3 sync"), status, ...(v.on
     ? [btn(t("Sync now"), async (e) => { e.target.classList.add("busy"); renderSync(await api("davsync/now", {}).catch((x) => ({ ...v, error: x.message }))); }),
@@ -11847,8 +11882,10 @@ function davForm(v) {
   const [keysL, keys] = tick(t("Providers' API keys"), v.keys !== false);
   const [agentsL, agents] = tick(t("Agents' models"), v.agents !== false);
   const [libL, lib] = tick(t("Library: instructions, MCP servers and skills"), v.library !== false);
+  // usage: off unless picked, each computer its own (#542)
+  const [useL, use] = tick(t("Usage: this computer's calls, for the Usage page on the others"), !!v.usage);
   const what = el("div", "stack");
-  what.append(keysL, agentsL, libL);
+  what.append(keysL, agentsL, libL, useL);
   const davFields = [...field(t("Address"), url, t("A folder named magpie is made in it.")),
     ...field(t("User"), user),
     ...field(t("Password"), pass)];
@@ -11877,7 +11914,7 @@ function davForm(v) {
   ed.append(...to,
     ...davFields, ...s3Fields,
     ...field(t("Passphrase"), phrase, t("The file is sealed with it on this computer; the server only ever sees it sealed. Keep it: without it the file can't be opened.")),
-    ...field(t("Also sync"), what));
+    ...field(t("Also sync"), what, t("Usage goes as a file a day: times, tokens, models and costs, never what was said. Turn it on on each computer that shares its own.")));
   show();
   const off = v.on ? el("button", "text danger", t("Turn off")) : el("span");
   const cancel = el("button", "text", t("Cancel"));
@@ -11893,7 +11930,7 @@ function davForm(v) {
       ? { url: "s3://" + b + (p ? "/" + p : ""), user: keyID.value.trim(), password: secret.value, endpoint: endpoint.value.trim(), region: region.value.trim(), pathStyle: pathStyle.checked }
       : { url: url.value.trim(), user: user.value.trim(), password: pass.value };
     try {
-      const r = await api("davsync/save", { ...where, passphrase: phrase.value, keys: keys.checked, agents: agents.checked, library: lib.checked });
+      const r = await api("davsync/save", { ...where, passphrase: phrase.value, keys: keys.checked, agents: agents.checked, library: lib.checked, ...(use.checked || v.usage ? { usage: use.checked } : {}) });
       if (!r.error) syncOpen = "";
       renderSync(r);
       if (r.error) return;
@@ -13294,8 +13331,9 @@ if (mode === "window" && params.get("view") === "usage") {
   if (params.get("tab") === "requests") usageTab = "requests";
   ledProvider = params.get("provider") || "";
   ledAgent = params.get("agent") || "";
+  ledComputer = params.get("computer") || "";
   const u = new URL(location.href);
-  for (const k of ["tab", "provider", "agent"]) u.searchParams.delete(k);
+  for (const k of ["tab", "provider", "agent", "computer"]) u.searchParams.delete(k);
   history.replaceState(null, "", u);
 }
 if (mode === "window" && ["providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"].includes(params.get("view"))) show(params.get("view"));

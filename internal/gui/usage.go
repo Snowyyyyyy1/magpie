@@ -101,7 +101,7 @@ func periodOf(s string) usage.Period {
 
 func ledgerFilter(q url.Values) usage.Filter {
 	id, _ := strconv.ParseInt(q.Get("route"), 10, 64)
-	return usage.Filter{RouteID: id, Model: q.Get("model"), Agent: q.Get("agent"), Provider: q.Get("provider"), CallerKey: q.Get("callerKey"), Failed: q.Get("failed") == "1", Query: q.Get("q")}
+	return usage.Filter{RouteID: id, Model: q.Get("model"), Agent: q.Get("agent"), Provider: q.Get("provider"), CallerKey: q.Get("callerKey"), Failed: q.Get("failed") == "1", Query: q.Get("q"), Computer: q.Get("computer")}
 }
 
 // ledgerRow is a usage.Row with the names the page shows it by.
@@ -113,6 +113,8 @@ type ledgerRow struct {
 	ProviderName   string `json:"providerName"`
 	Access         string `json:"access,omitempty"` // known account/route type, independent of model maker
 	PricingModel   string `json:"pricing_model,omitempty"`
+	// ComputerName is the other computer a call was made on, shared through sync (#542)
+	ComputerName string `json:"computerName,omitempty"`
 }
 
 type ledgerJSON struct {
@@ -132,6 +134,9 @@ type ledgerJSON struct {
 	// Agents and Providers: those with calls in the period, for the filters
 	Agents    []ledgerAgent `json:"agents"`
 	Providers []ledgerAgent `json:"providers"`
+	// Computers: this one ("this", no name) and the others whose usage
+	// sync brought (#542), for the filter; none while there are none
+	Computers []ledgerShare `json:"computers,omitempty"`
 }
 
 // ledgerShare is a usage.Share with the name and logo the page shows it by.
@@ -207,6 +212,12 @@ func ledgerPage(p usage.Period, f usage.Filter, offset, limit int) ledgerJSON {
 			lr.ProviderName = r.Provider
 		}
 		lr.CallerKeyLabel = callerLabels[r.CallerKeyID]
+		if r.Computer != "" {
+			lr.ComputerName = l.Names[r.Computer]
+			if lr.ComputerName == "" {
+				lr.ComputerName = r.Computer
+			}
+		}
 		out.Rows = append(out.Rows, lr)
 	}
 	for _, id := range l.Agents {
@@ -233,6 +244,13 @@ func ledgerPage(p usage.Period, f usage.Filter, offset, limit int) ledgerJSON {
 			shares = append(shares, ls)
 		}
 		out.By[d] = shares
+	}
+	for _, s := range l.Computers {
+		ls := ledgerShare{Share: s, Name: l.Names[s.ID]}
+		if s.ID != usage.ThisComputer && ls.Name == "" {
+			ls.Name = s.ID
+		}
+		out.Computers = append(out.Computers, ls)
 	}
 	return out
 }

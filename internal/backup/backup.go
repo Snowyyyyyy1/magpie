@@ -237,10 +237,18 @@ func header(e envelope) []byte {
 }
 
 func aead(pass string, e envelope) (cipher.AEAD, error) {
-	key, err := pbkdf2.Key(sha256.New, pass, e.Salt, e.Iterations, 32)
+	key, err := deriveKey(pass, e)
 	if err != nil {
 		return nil, err
 	}
+	return gcmOf(key)
+}
+
+func deriveKey(pass string, e envelope) ([]byte, error) {
+	return pbkdf2.Key(sha256.New, pass, e.Salt, e.Iterations, 32)
+}
+
+func gcmOf(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err

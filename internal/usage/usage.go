@@ -91,6 +91,10 @@ type Record struct {
 	// (gateway/archive.go), when it was on: the Usage page reads it back
 	// by it long after Recent calls has let the call go (#447)
 	Archive string `json:"archive,omitempty"`
+	// Computer is the other computer the call was made on, by its id, for
+	// a call brought here by sync (#542); "" for one made here, as every
+	// call in usage.jsonl is
+	Computer string `json:"computer,omitempty"`
 	// BodyIn and BodyOut are the request and reply as the gateway
 	// captured them, filled only for an OTLP export with bodies on (#538)
 	// and never written to usage.jsonl

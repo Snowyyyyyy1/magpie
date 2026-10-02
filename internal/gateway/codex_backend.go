@@ -65,7 +65,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 	// newer: the backend serves a model only to a client that knows it
 	provider.SawCodexClient(r.Header)
 	rest := strings.TrimPrefix(r.URL.Path, CodexPath)
-	body, ok := s.readRequestBody(w, r, provider.Responses, codexReader)
+	body, ok := s.readRequestBody(w, r, provider.Responses, codexReader, 0)
 	if !ok {
 		return
 	}
@@ -148,21 +148,6 @@ func hasSealedAgentMessage(body []byte) bool {
 		}
 	}
 	return false
-}
-
-// codexBody reads a request's body as it was before Codex compressed it
-// (zstd, for the ChatGPT backend), so it can be read and passed on plain.
-func codexBody(r *http.Request) ([]byte, error) {
-	rd, err := codexReader(r)
-	if err != nil {
-		return nil, err
-	}
-	defer rd.Close()
-	body, err := io.ReadAll(io.LimitReader(rd, defaultBodyLimit+1))
-	if int64(len(body)) > defaultBodyLimit {
-		return nil, errors.New("request body exceeds gateway limit")
-	}
-	return body, err
 }
 
 func codexReader(r *http.Request) (io.ReadCloser, error) {

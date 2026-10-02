@@ -1239,12 +1239,17 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown or expired Claude run", http.StatusNotFound)
 		return
 	}
+	body, status, err := readBoundedRequestBody(w, r, requestLimits{body: 16 << 20}, nil)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
 	var call struct {
 		ToolCallID string          `json:"tool_call_id"`
 		Name       string          `json:"name"`
 		Arguments  json.RawMessage `json:"arguments"`
 	}
-	if json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&call) != nil || call.ToolCallID == "" {
+	if json.Unmarshal(body, &call) != nil || call.ToolCallID == "" {
 		http.Error(w, "invalid tool call", http.StatusBadRequest)
 		return
 	}

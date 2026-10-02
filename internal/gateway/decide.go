@@ -398,13 +398,8 @@ const maxSystemOneBody = 1 << 20
 // conversation is: the Routing view and the day's jsonl would otherwise
 // never see Jev, which answers no /v1/chat/completions.
 func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSystemOneBody+1))
-	if err != nil {
-		writeError(w, provider.Chat, http.StatusBadRequest, err.Error())
-		return
-	}
-	if len(body) > maxSystemOneBody {
-		writeError(w, provider.Chat, http.StatusRequestEntityTooLarge, "request body too large")
+	body, ok := s.readRequestBody(w, r, provider.Chat, nil, maxSystemOneBody)
+	if !ok {
 		return
 	}
 	var q struct {

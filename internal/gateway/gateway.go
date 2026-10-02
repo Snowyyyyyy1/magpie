@@ -3342,6 +3342,8 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 		typ = "permission_error"
 	case status == 404:
 		typ = "not_found_error"
+	case status == 413 && proto == provider.Anthropic:
+		typ = "request_too_large"
 	case status == 429:
 		typ = "rate_limit_error"
 	case status == 529:
@@ -3361,7 +3363,7 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	case provider.Anthropic:
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
 	case provider.Gemini:
-		st := map[int]string{400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
+		st := map[int]string{400: "INVALID_ARGUMENT", 408: "DEADLINE_EXCEEDED", 413: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
 			429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "UNAVAILABLE", 503: "UNAVAILABLE", 529: "UNAVAILABLE"}[status]
 		if st == "" {
 			st = "UNKNOWN"

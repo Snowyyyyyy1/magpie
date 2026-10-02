@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,10 +78,11 @@ func TestRequestBodySocketTimeout(t *testing.T) {
 func TestRequestBodyDeadlineCleared(t *testing.T) {
 	s := New()
 	s.requestLimits.readTimeout = 30 * time.Millisecond
-	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var connections atomic.Int64
+	gw := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deadlines := []time.Time{}
 		_, ok := s.requestBody(deadlineRecorder{w, &deadlines}, r, provider.Chat)
-		if len(deadlines) != 2 || !deadlines[len(deadlines)-1].IsZero() {
+		if len(deadlines) < 3 || !deadlines[len(deadlines)-1].IsZero() {
 			t.Errorf("body deadline was not cleared: %v", deadlines)
 		}
 		if !ok {
@@ -93,15 +95,26 @@ func TestRequestBodyDeadlineCleared(t *testing.T) {
 		// otherwise the server closes keepalive input during a long stream.
 		io.WriteString(w, "last\n")
 	}))
-	defer gw.Close()
-	res, err := http.Post(gw.URL, "application/json", strings.NewReader("abc"))
-	if err != nil {
-		t.Fatal(err)
+	gw.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
 	}
-	defer res.Body.Close()
-	b, err := io.ReadAll(res.Body)
-	if err != nil || string(b) != "first\nlast\n" {
-		t.Fatalf("long response = %q, %v", b, err)
+	gw.Start()
+	defer gw.Close()
+	for i := 0; i < 2; i++ {
+		res, err := gw.Client().Post(gw.URL, "application/json", strings.NewReader("abc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil || string(b) != "first\nlast\n" {
+			t.Fatalf("long response = %q, %v", b, err)
+		}
+	}
+	if n := connections.Load(); n != 1 {
+		t.Fatalf("streaming deadline broke keepalive: %d connections", n)
 	}
 }
 

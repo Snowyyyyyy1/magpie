@@ -162,7 +162,7 @@ func readFilming(r *http.Request) (filming, error) {
 			}
 		}
 	} else {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return f, err
 		}

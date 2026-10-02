@@ -330,7 +330,7 @@ func readDrawing(r *http.Request) (drawing, error) {
 			d.Mask = &pic
 		}
 	} else {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return d, err
 		}

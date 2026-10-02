@@ -133,6 +133,81 @@ func TestDetectProtocols(t *testing.T) {
 	}
 }
 
+// Some Responses relays reject the string shorthand and require message arrays.
+func TestResponsesProbesUseArrayInput(t *testing.T) {
+	detectHome(t)
+	const model = "gpt-test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/models":
+			io.WriteString(w, `{"data":[{"id":"`+model+`"}]}`)
+		case "POST /v1/responses":
+			var in struct {
+				Model string `json:"model"`
+				Input []struct {
+					Type    string `json:"type"`
+					Role    string `json:"role"`
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, `{"error":{"message":"input must be an array"}}`, http.StatusBadRequest)
+				return
+			}
+			if in.Model != model || len(in.Input) != 1 || in.Input[0].Type != "message" ||
+				in.Input[0].Role != "user" || len(in.Input[0].Content) != 1 ||
+				in.Input[0].Content[0].Type != "input_text" || in.Input[0].Content[0].Text != "hi" {
+				http.Error(w, `{"error":{"message":"expected a user text message"}}`, http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, `{"object":"response","status":"completed","output":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	p := Provider{ID: "relay", Key: "sk-relay", Responses: srv.URL + "/v1", Models: []string{model}}
+	ctx := context.Background()
+	check := func(t *testing.T, r Result) {
+		t.Helper()
+		if !r.OK || r.Status != http.StatusOK || r.Protocol != Responses || r.Model != model {
+			t.Fatalf("Responses probe: %+v", r)
+		}
+	}
+	t.Run("Detect", func(t *testing.T) {
+		rs, err := p.Detect(ctx, srv.URL, model)
+		if err != nil || len(rs) != len(Protocols) {
+			t.Fatalf("Detect: %v, %+v", err, rs)
+		}
+		check(t, rs[1].Result)
+	})
+	t.Run("DetectModels", func(t *testing.T) {
+		each, sum, err := p.DetectModels(ctx, srv.URL, []string{model})
+		if err != nil || len(each) != 1 || len(each[0].Results) != len(Protocols) || len(sum) != len(Protocols) {
+			t.Fatalf("DetectModels: %v, %+v, %+v", err, each, sum)
+		}
+		check(t, each[0].Results[1].Result)
+		check(t, sum[1].Result)
+	})
+	t.Run("Test", func(t *testing.T) {
+		rs := p.Test(ctx)
+		if len(rs) != 1 {
+			t.Fatalf("Test: %+v", rs)
+		}
+		check(t, rs[0])
+	})
+	t.Run("TestModels", func(t *testing.T) {
+		rs := p.TestModels(ctx, []string{model})
+		if len(rs) != 1 {
+			t.Fatalf("TestModels: %+v", rs)
+		}
+		check(t, rs[0])
+	})
+}
+
 // A model typed is the one asked on all three, and the vendor's list isn't
 // asked for; a URL the provider has for an API is asked rather than the
 // one typed; no URL at all says so.

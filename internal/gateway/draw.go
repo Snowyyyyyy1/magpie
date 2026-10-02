@@ -194,6 +194,16 @@ type drawn struct {
 
 func (s *Server) images(edit bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		inputBody, admitted := s.requestBody(w, r, provider.Chat)
+		if !admitted {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(inputBody))
+		defer func() {
+			if r.MultipartForm != nil {
+				r.MultipartForm.RemoveAll()
+			}
+		}()
 		start := time.Now()
 		d, err := readDrawing(r)
 		if err != nil {

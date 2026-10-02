@@ -122,3 +122,34 @@ func TestUsageLargeSummaryIsCompleteButNotCached(t *testing.T) {
 		t.Fatal("oversized Sessions retained in summary cache")
 	}
 }
+
+// Rebuilding an uncached snapshot with a larger budget keeps its version and
+// page key. The preceding query must leave an initialized page map to write.
+func TestUsagePageCacheAfterUncachedQuery(t *testing.T) {
+	pageHome(t)
+	historyLog(t, 1034)
+	normalBudget := requestCacheBytes
+	cacheBudget(t, 128)
+	QueryPage(All, Filter{}, 0, 100)
+	logIndex.Lock()
+	uncached := logIndex.snapshot.uncached
+	logIndex.Unlock()
+	if !uncached {
+		t.Fatal("fixture must exceed the tiny budget")
+	}
+	requestCache.Lock()
+	key := requestCache.key
+	requestCache.Unlock()
+
+	requestCacheBytes = normalBudget
+	got := QueryPage(All, Filter{}, 0, 100)
+	equalPage(t, got, pageFromLedger(All, Filter{}, 0, 100, LedgerOf(All, Filter{})))
+	requestCache.Lock()
+	defer requestCache.Unlock()
+	if requestCache.key != key {
+		t.Fatal("page key changed instead of exercising the same cache")
+	}
+	if _, ok := requestCache.pages[pageKey{All, Filter{}, 0, 100}]; !ok {
+		t.Fatal("page not cached after rebuilding within budget")
+	}
+}

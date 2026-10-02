@@ -42,7 +42,14 @@ func statLogFile(path string) (os.FileInfo, error) {
 		0,
 	)
 	if err != nil {
-		return nil, err
+		// Go's opener handles long paths on Windows versions where the raw
+		// API requires an extended path prefix. Keep the same-handle stamp.
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		return statLogHandle(f)
 	}
 	f := os.NewFile(uintptr(h), path)
 	if f == nil {

@@ -5,6 +5,8 @@ package usage
 import (
 	"bytes"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -152,11 +154,43 @@ func TestLogChangeTrustedAppendReuse(t *testing.T) {
 		t.Fatal("append did not record trusted change-time states")
 	}
 	after := readLogSnapshot()
+	if after.hash != "" {
+		t.Fatal("trusted append scanned the historical prefix")
+	}
 	if after.blocks[0] != before.blocks[0] {
 		t.Fatal("in-process append rebuilt the sealed prefix")
 	}
 	got, want := Summarize(All), summarize(All, time.Now(), Load(time.Time{}))
 	if got.Totals != want.Totals {
 		t.Fatalf("summary stale after trusted append: got %+v want %+v", got.Totals, want.Totals)
+	}
+}
+
+func TestLogChangeLongPath(t *testing.T) {
+	pageHome(t)
+	dir := t.TempDir()
+	for len(dir) < 320 {
+		dir = filepath.Join(dir, strings.Repeat("nested", 8))
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	historyLog(t, 1034)
+	if len(Path()) <= 260 {
+		t.Fatal("fixture must exceed the legacy Windows path limit")
+	}
+	info, err := statLogFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, err := os.Stat(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameLogFile(info, native) || info.Size() != native.Size() {
+		t.Fatal("long-path stat lost file identity or size")
+	}
+	requireChangeStamp(t, Path())
+	got, want := Summarize(All), summarize(All, time.Now(), Load(time.Time{}))
+	if got.Totals != want.Totals || got.Calls != 1034 {
+		t.Fatalf("long-path history missing: got %+v want %+v", got.Totals, want.Totals)
 	}
 }

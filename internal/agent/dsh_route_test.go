@@ -325,13 +325,20 @@ func TestKeepDshWiredWritesTheRouteAgain(t *testing.T) {
 	t.Cleanup(func() { stop(); <-done })
 	go func() { defer close(done); keepDshWired(ctx, 10*time.Millisecond) }()
 	time.Sleep(100 * time.Millisecond) // a round or two with the route already right
-	// something else writes the file while magpie serves
-	os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
-		dshRouteFixture("deepseek/pro")+
-		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"), 0o644)
-	if d := a.Check(); d == "" {
-		t.Fatal("the route changed under magpie is not named")
-	}
+	// Observe the changed route before allowing the loop to repair it.
+	// Without this lock, a successful repair can race the stale-route check.
+	func() {
+		dshWrites.Lock()
+		defer dshWrites.Unlock()
+		if err := os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
+			dshRouteFixture("deepseek/pro")+
+			"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if d := a.Check(); d == "" {
+			t.Fatal("the route changed under magpie is not named")
+		}
+	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for a.Check() != "" {
 		if time.Now().After(deadline) {

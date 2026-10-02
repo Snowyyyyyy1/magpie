@@ -8435,8 +8435,13 @@ try {
 let panelUseAt = 0;
 const PANEL_USE_PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
 
-async function loadPanelUse() {
-  if (mode !== "panel") return;
+// One read at a time: a 10 s timer must not start a second behind a slow one,
+// and a read asked for while one is (a period or a provider picked, the tab
+// shown) is kept and served when it is done, so a pick is never dropped.
+let panelUseFlight = null, panelUseQueued = false;
+function loadPanelUse() {
+  if (mode !== "panel") return Promise.resolve();
+  if (panelUseFlight) { panelUseQueued = true; return panelUseFlight; }
   const q = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
   if (panelUseProvider) q.set("provider", panelUseProvider);
   if (panelUseComputer) q.set("computer", panelUseComputer);
@@ -8445,19 +8450,31 @@ async function loadPanelUse() {
   // what is shown stays, dimmed, till the answer comes: the panel doesn't
   // shrink to a skeleton and lose where it was scrolled to
   $("#panelUsage").classList.add("pu-loading");
-  try {
-    const l = await api("usage/requests?" + want);
-    const now = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
-    if (panelUseProvider) now.set("provider", panelUseProvider);
-    if (panelUseComputer) now.set("computer", panelUseComputer);
-    if (now.toString() !== want) return; // another period or provider was picked meanwhile
-    panelUse = l;
-    $("#panelUsage").classList.remove("pu-loading");
-    if (panelTab === "stats") renderPanelUse();
-  } catch (e) {
-    $("#panelUsage").classList.remove("pu-loading");
-    throw e;
-  }
+  const read = async () => {
+    try {
+      const l = await api("usage/requests?" + want);
+      const now = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
+      if (panelUseProvider) now.set("provider", panelUseProvider);
+      if (panelUseComputer) now.set("computer", panelUseComputer);
+      if (now.toString() !== want) return; // another period or provider was picked meanwhile
+      panelUse = l;
+      $("#panelUsage").classList.remove("pu-loading");
+      if (panelTab === "stats") renderPanelUse();
+    } catch (e) {
+      // the read failed: nothing is on its way for it, so the dimming comes off
+      $("#panelUsage").classList.remove("pu-loading");
+      throw e;
+    }
+  };
+  const flight = read().finally(() => {
+    if (panelUseFlight !== flight) return;
+    panelUseFlight = null;
+    if (!panelUseQueued) return;
+    panelUseQueued = false;
+    return loadPanelUse(); // include the latest pick or manual refresh in this promise
+  });
+  panelUseFlight = flight;
+  return flight;
 }
 // the tab is shown: what it has is drawn, and read again if it is old
 function panelUseShown() {
@@ -13148,31 +13165,55 @@ function renderUsageEvery() {
 }
 
 // refreshUsage reads what the tab shown draws; now is the reader asking, which
-// reads the page it is on too, and the sessions and the allowances
-async function refreshUsage(now = false) {
+// reads the page it is on too, and the sessions and the allowances.
+// A read that outlives its interval must not have another started behind it:
+// one is in flight at a time, and a read asked for while one is (the timer, or
+// the reader's button, which may not be swallowed) is served when it is done,
+// the reader's own if either asked for it. The promise covers that second read
+// too, so the button turns while the reader's own is still to come.
+let usageFlight = null, usageQueued = false, usageQueuedNow = false;
+function refreshUsage(now = false) {
   usageLast = performance.now();
-  try {
-    if (usageTab === "sessions") {
-      if (sessions && (now || performance.now() - sessionsAt > 15e3)) { sessionsAt = performance.now(); await loadSessions(); }
-    } else if (usageTab === "requests") {
-      // the newest page takes the requests as they come; an older one stays put
-      if (ledger && (now || !ledOffset)) await loadLedger(true);
-    } else {
-      // the reader asking reads the allowances afresh, a Claude account's by
-      // running Claude Code's own /usage (the backend runs it at most once in 30s)
-      let q = null;
-      if (now) { quotasAsked = performance.now(); q = loadQuotas(true); }
-      else if (usage && performance.now() - quotasAsked > 60e3) { quotasAsked = performance.now(); loadQuotas(); }
-      if (usage) {
-        const p = period;
-        const u = await api("usage?period=" + p);
-        if (view === "usage" && usageTab === "usage" && p === period && JSON.stringify(u) !== JSON.stringify(usage)) { usage = u; renderUsage(); }
+  if (usageFlight) {
+    usageQueued = true;
+    usageQueuedNow = usageQueuedNow || now;
+    return usageFlight; // this promise includes the queued read
+  }
+  const run = async (want) => {
+    try {
+      if (usageTab === "sessions") {
+        if (sessions && (want || performance.now() - sessionsAt > 15e3)) { sessionsAt = performance.now(); await loadSessions(); }
+      } else if (usageTab === "requests") {
+        // the newest page takes the requests as they come; an older one stays put
+        if (ledger && (want || !ledOffset)) await loadLedger(true);
+      } else {
+        // the reader asking reads the allowances afresh, a Claude account's by
+        // running Claude Code's own /usage (the backend runs it at most once in 30s)
+        let q = null;
+        if (want) { quotasAsked = performance.now(); q = loadQuotas(true); }
+        else if (usage && performance.now() - quotasAsked > 60e3) { quotasAsked = performance.now(); loadQuotas(); }
+        if (usage) {
+          const p = period;
+          const u = await api("usage?period=" + p);
+          if (view === "usage" && usageTab === "usage" && p === period && JSON.stringify(u) !== JSON.stringify(usage)) { usage = u; renderUsage(); }
+        }
+        await q;
       }
-      await q;
-    }
-    usageReadAt = Date.now();
-    renderUsageEvery();
-  } catch {}
+      usageReadAt = Date.now();
+      renderUsageEvery();
+    } catch {}
+  };
+  const flight = Promise.resolve().then(() => run(now)).then(() => {
+    if (usageFlight !== flight) return;
+    usageFlight = null;
+    if (!usageQueued) return;
+    const want = usageQueuedNow;
+    usageQueued = usageQueuedNow = false;
+    // one more read, the reader's own if either asked for it
+    return refreshUsage(want);
+  });
+  usageFlight = flight;
+  return flight;
 }
 renderUsageEvery();
 setInterval(() => {

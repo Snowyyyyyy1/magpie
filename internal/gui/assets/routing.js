@@ -1926,8 +1926,15 @@
     for (const r of live) play(r.id);
     renderAll();
   }
-  let seen = false, lastFrame = 0;
+  let seen = false, lastFrame = 0, ticking = 0;
+  // the loop runs only while the page is the one in sight: out of sight it
+  // is not scheduled at all, so a hidden Routing page — the window hidden,
+  // another view picked, another tab open — asks for no frames forever
+  // (#302's other half). Shown again, start() resumes it, and resume()
+  // draws the page as it is now. The requests that came meanwhile are
+  // listed by the poll, which never stops.
   function frame(ts) {
+    ticking = 0;
     const vis = shown();
     if (vis && (!seen || ts - lastFrame > 1000)) resume();
     seen = vis;
@@ -1949,8 +1956,21 @@
       trips = [];
       if (capQ.length) { show(capQ[capQ.length - 1]); capQ = []; }
     }
-    requestAnimationFrame(frame);
+    if (vis) ticking = requestAnimationFrame(frame);
   }
+  // start asks for the next frame of the loop, unless one is already asked
+  // for or the page is out of sight, and draws it once as it is now — a
+  // page out of sight for a while has said nothing of what happened since
+  function start() {
+    if (ticking || !shown()) return;
+    resume();
+    ticking = requestAnimationFrame(frame);
+  }
+  // in sight again: the view picked, the window shown, another tab left,
+  // the window covered and drawing frames once more
+  new MutationObserver(start).observe($("#view-routing"), { attributes: true, attributeFilter: ["hidden"] });
+  document.addEventListener("visibilitychange", start);
+  window.addEventListener("focus", start);
   // countdowns tick once a second
   setInterval(() => { if (shown()) { if (!pinned && loaded && cur) sync(); render(); renderActs(listed()); } }, 1000);
 
@@ -3068,6 +3088,6 @@
   new ResizeObserver(fitSoon).observe($("#view-routing"));
   new ResizeObserver(fitSoon).observe(box);
   words();
-  requestAnimationFrame(frame);
+  start();
   poll();
 })();

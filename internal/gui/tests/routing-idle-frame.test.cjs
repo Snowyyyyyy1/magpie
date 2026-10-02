@@ -12,7 +12,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
-const { chromium } = require("playwright");
+const { chromium, webkit } = require("playwright");
+const engines = process.env.BROWSER ? [process.env.BROWSER] : ["webkit"];
 
 const assets = path.resolve(__dirname, "../assets");
 const routing = path.join(assets, "routing.js");
@@ -27,7 +28,7 @@ function req(id) {
   return { id, seq: id, time: iso(t0), agent: agentsOf[id % agentsOf.length], model: order[0].model, provider: order[0].provider, order, tries, done: true, status: 200, ms: 400, tokens: 900 };
 }
 
-function serve(lang) {
+function serve(lang, feed = [req(1)]) {
   const state = { agents: agentsOf.map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1), path: `/test/${id}`, fields: [] })), profiles: [], settings: { lang, theme: "light" } };
   return async (route) => {
     const url = new URL(route.request().url());
@@ -36,7 +37,7 @@ function serve(lang) {
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
-    if (url.pathname === "/api/gateway/trace") return json({ mine: true, now: new Date().toISOString(), seq: url.searchParams.get("after") || 0, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: url.searchParams.get("wait") ? [] : [req(1)] });
+    if (url.pathname === "/api/gateway/trace") return json({ mine: true, now: new Date().toISOString(), seq: url.searchParams.get("after") || 0, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: url.searchParams.get("wait") ? [] : feed });
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
     if (url.pathname === "/api/groups") return json({ models: [], groups: [], pools: [] });
     if (url.pathname === "/api/providers") return json({ providers: [], excluded: [], gateway: { running: true, window: true, url: "http://127.0.0.1:3999" } });
@@ -52,6 +53,16 @@ function serve(lang) {
 const init = () => {
   const raf = window.requestAnimationFrame.bind(window);
   window.__frames = 0;
+  window.__steps = 0;
+  window.__packets = 0;
+  window.__hidden = false;
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => window.__hidden });
+  window.__visibility = (hidden) => { window.__hidden = hidden; document.dispatchEvent(new Event("visibilitychange")); };
+  new MutationObserver((records) => {
+    for (const record of records) for (const node of record.addedNodes) {
+      if (node.nodeType === 1 && node.matches(".pkt")) window.__packets++;
+    }
+  }).observe(document, { childList: true, subtree: true });
   window.__seenFrame = false;
   // marked between frames, and the next frame awaited, so the one already
   // asked for when the mark falls is out of the count before it settles
@@ -60,7 +71,7 @@ const init = () => {
   window.requestAnimationFrame = (cb) => {
     const self = typeof cb === "function" && /requestAnimationFrame\s*\(\s*([A-Za-z_$][\w$]*)/.test(cb.toString()) && new RegExp(`\\b${RegExp.$1}\\s*\\(`).test(cb.toString());
     if (typeof cb === "function" && (cb.name === "frame" || self)) window.__seenFrame = true;
-    return raf((ts) => { if (typeof cb === "function" && (cb.name === "frame" || self)) window.__frames++; cb(ts); });
+    return raf((ts) => { if (cb.name === "step") window.__steps++; if (typeof cb === "function" && (cb.name === "frame" || self)) window.__frames++; cb(ts); });
   };
 };
 
@@ -72,9 +83,9 @@ test("the loop's frame is still there to be counted, and asks for itself", async
   assert(byName(src) || selfRaf(src), "routing.js must still keep its frame loop in a function of its own, or the test below counts nothing");
 });
 
-for (const lang of ["en", "zh"]) {
-  test(`chromium ${lang}: with Agents selected the Routing loop asks for no more frames, and picking Routing again resumes it`, async (t) => {
-    const browser = await chromium.launch({ channel: "chromium" });
+for (const engine of engines) for (const lang of ["en", "zh"]) {
+  test(`${engine} ${lang}: with Agents selected the Routing loop asks for no more frames, and picking Routing again resumes it`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const context = await browser.newContext({ viewport: { width: 1100, height: 760 } });
     await context.addInitScript(init);
     const page = await context.newPage();
@@ -85,7 +96,7 @@ for (const lang of ["en", "zh"]) {
     t.after(async () => {
       if (process.env.ARTIFACT_DIR) {
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `chromium-${lang}-idle-frame.png`) });
+        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-idle-frame.png`) });
       }
       await browser.close();
     });
@@ -117,5 +128,81 @@ for (const lang of ["en", "zh"]) {
     assert(again > 10, `picking Routing again must resume the loop (${again} frames in 600ms)`);
     assert.equal(await page.evaluate(() => document.querySelectorAll(".rt-req").length >= 1), true, "the page is drawn again");
     assert(errors.length === 0, errors.join("\n"));
+    // A document visibility event must stop the loop even when the engine
+    // would suspend its last scheduled frame before it can observe hidden.
+    await page.evaluate(() => window.__visibility(true));
+    await page.evaluate(() => window.__mark());
+    assert.equal(await page.evaluate(() => window.__count(600)), 0);
+    await page.evaluate(() => window.__visibility(false));
+    await page.evaluate(() => window.__mark());
+    assert(await page.evaluate(() => window.__count(600)) > 10);
+    assert.equal(errors.length, 0, errors.join("\n"));
   });
+}
+
+const hiddenWays = {
+  "another view": {
+    hide: page => page.locator('#nav button[data-view="agents"]').click(),
+    show: page => page.locator('#nav button[data-view="routing"]').click(),
+  },
+  "document visibility": {
+    hide: page => page.evaluate(() => window.__visibility(true)),
+    show: page => page.evaluate(() => window.__visibility(false)),
+  },
+};
+
+async function routingPage(t, engine, lang, feed, view = "routing") {
+  const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+  t.after(() => browser.close());
+  const context = await browser.newContext({ viewport: { width: 1100, height: 760 } });
+  await context.addInitScript(init);
+  const page = await context.newPage();
+  page.setDefaultTimeout(5000);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+  await page.route("**/*", serve(lang, feed));
+  await page.goto(`http://magpie.test/?view=${view}`);
+  await page.waitForFunction(() => document.querySelectorAll(".rt-req").length > 0);
+  return { page, errors };
+}
+
+for (const engine of engines) {
+  for (const lang of ["en", "zh"]) {
+    for (const [way, how] of Object.entries(hiddenWays)) {
+      test(`${engine} ${lang}: hiding a running replay through ${way} ends it and stops its frames`, async t => {
+        const { page, errors } = await routingPage(t, engine, lang, [1, 2, 3, 4, 5].map(req));
+        await page.getByRole("button", { name: lang === "zh" ? "全部重放" : "Replay them all", exact: true }).click();
+        await page.waitForFunction(() => !document.querySelector(".rt-replay").hidden && document.querySelectorAll(".pkt").length > 0);
+        await how.hide(page);
+        // Check the bar's own hidden flag, not visibility inherited from Agents.
+        await page.waitForFunction(() => document.querySelector(".rt-replay").hidden && document.querySelectorAll(".pkt").length === 0);
+        await page.evaluate(() => { window.__steps = 0; });
+        await page.waitForTimeout(300);
+        assert(await page.evaluate(() => window.__steps) <= 1, "replay kept scheduling frames after it was hidden");
+        await how.show(page);
+        assert(await page.evaluate(() => document.querySelector(".rt-replay").hidden), "showing Routing restarted the old replay");
+        assert.equal(errors.length, 0, errors.join("\n"));
+      });
+    }
+    test(`${engine} ${lang}: each live request plays once when Routing resumes`, async t => {
+      const r = req(1);
+      r.done = false;
+      r.status = 0;
+      r.tries.forEach(tr => { tr.done = false; tr.status = 0; });
+      const { page, errors } = await routingPage(t, engine, lang, [r], "agents");
+      const showOnce = async show => {
+        await page.evaluate(() => { window.__packets = window.__frames = 0; });
+        await show(page);
+        await page.waitForFunction(() => window.__frames >= 2);
+        assert.equal(await page.evaluate(() => window.__packets), 1, "resume played a live request twice");
+      };
+      await showOnce(hiddenWays["another view"].show);
+      for (const how of Object.values(hiddenWays)) {
+        await how.hide(page);
+        await page.evaluate(() => window.__mark());
+        await showOnce(how.show);
+      }
+      assert.equal(errors.length, 0, errors.join("\n"));
+    });
+  }
 }

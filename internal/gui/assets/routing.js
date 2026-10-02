@@ -600,7 +600,8 @@
   // fly carries a dot along paths one after another, as one flight — and
   // the magpie holding it in its beak, if there is one
   const fly = (dot, bird, legs, ms) => new Promise((res) => {
-    const tr = { dot, bird, legs, t0: performance.now(), ms: still() || !shown() ? 0 : ms, res, g: gen };
+    if (!shown()) { res(); return; } // no hidden frame is needed to finish it
+    const tr = { dot, bird, legs, t0: performance.now(), ms: still() ? 0 : ms, res, g: gen };
     pose(tr, 0);
     trips.push(tr);
   }).finally(() => { for (const l of legs) if (l.j) l.p.remove(); });
@@ -1951,20 +1952,24 @@
       }
       if (ts < flipUntil) layout();
       if (capQ.length && ts - capAt > (capLo && !capQ[0].lo ? 500 : 1700)) show(capQ.shift());
-    } else {
-      for (const tr of trips) tr.res();
-      trips = [];
-      if (capQ.length) { show(capQ[capQ.length - 1]); capQ = []; }
-    }
+    } else pause();
     if (vis) ticking = requestAnimationFrame(frame);
   }
-  // start asks for the next frame of the loop, unless one is already asked
-  // for or the page is out of sight, and draws it once as it is now — a
-  // page out of sight for a while has said nothing of what happened since
+  function pause() {
+    if (ticking) cancelAnimationFrame(ticking);
+    ticking = 0;
+    seen = false;
+    endReplay(true);
+    for (const tr of trips) tr.res();
+    trips = [];
+    wake();
+    if (capQ.length) { show(capQ[capQ.length - 1]); capQ = []; }
+  }
+  // Visibility events can arrive after the browser has suspended frames, so
+  // finish hidden work here too. The first visible frame alone owns resume.
   function start() {
-    if (ticking || !shown()) return;
-    resume();
-    ticking = requestAnimationFrame(frame);
+    if (!shown()) { pause(); return; }
+    if (!ticking) ticking = requestAnimationFrame(frame);
   }
   // in sight again: the view picked, the window shown, another tab left,
   // the window covered and drawing frames once more

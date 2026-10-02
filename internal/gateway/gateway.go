@@ -264,7 +264,9 @@ type Server struct {
 	sightOrder []string
 	// the requests out at each key or account with a MaxConcurrency, and
 	// those waiting their turn (concurrency.go)
-	lanes lanes
+	lanes         lanes
+	requestLimits requestLimits
+	budget        requestBudget
 }
 
 // New makes a gateway.
@@ -638,11 +640,12 @@ var estimatedMoved = []string{"cursor", "grok", "devin", "kiro", "qoder", "zed",
 // it implements counting, else a rough estimate. A failed connection or
 // limited key yields to the next key; other failures reach the client.
 func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, provider.Anthropic, 400, err.Error())
+	body, release, ok := s.requestBody(w, r, provider.Anthropic)
+	if !ok {
 		return
 	}
+	defer release()
+	var err error
 	var model string
 	body, model, err = requestModel(body)
 	if err != nil {
@@ -763,11 +766,12 @@ func unsupportedCount(status int, body []byte) bool {
 // handle is the request path of one client API.
 func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeError(w, from, 400, err.Error())
+		body, release, ok := s.requestBody(w, r, from)
+		if !ok {
 			return
 		}
+		defer release()
+		var err error
 		body, _, err = requestModel(body)
 		if err != nil {
 			writeError(w, from, 400, err.Error())
@@ -791,11 +795,12 @@ func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, method := call[:i], call[i+1:]
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, provider.Gemini, 400, err.Error())
+	body, release, ok := s.requestBody(w, r, provider.Gemini)
+	if !ok {
 		return
 	}
+	defer release()
+	var err error
 	if err := decodeRequest(body, &struct{}{}); err != nil {
 		writeError(w, provider.Gemini, 400, err.Error())
 		return
@@ -1158,6 +1163,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	providerKeyID, providerKeyName := "", ""
 	var other *Try     // the first failure that wasn't an allowance run out
 	autoReset := false // a Codex or Claude reset looked at, once a request
+	localAdmissionRejected := false
 	for i := 0; i < len(cands); i++ {
 		c := cands[i]
 		last := i == len(cands)-1
@@ -1243,8 +1249,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.trace.update(tr, func(t *Route) {
 			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, Fast: fast, Start: began})
 		})
-		held := false // answered as its vendor did a moment ago, without asking
-		var queued int64 // ms it waited for a slot of its key's or account's
+		queueStopped := false // local admission never selects a fallback or rests a provider
+		held := false         // answered as its vendor did a moment ago, without asking
+		var queued int64      // ms it waited for a slot of its key's or account's
 		if said, ok := verifyHeld(c.restKey()); ok && last {
 			// the account must be verified first (#152): the agent's
 			// reconnects are told so again, not sent on to a vendor that
@@ -1260,9 +1267,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// its slots is free, in turn; the agent gone while it waits,
 			// nothing is sent (the 499 below)
 			waited := time.Now()
-			release, ok := s.lanes.acquire(ctx, c.who(), c.p.Concurrency())
+			release, queueErr := s.lanes.acquireBounded(ctx, c.who(), c.p.Concurrency())
 			queued = time.Since(waited).Milliseconds()
-			if ok {
+			if queueErr == nil {
 				if queued > 0 {
 					s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1].Queued = queued })
 				}
@@ -1272,6 +1279,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					defer release()
 					call.Status, call.Error = s.attempt(hw, r.WithContext(ctx), from, c.p, c.model, attemptBody, &call)
 				}()
+			} else if r.Context().Err() == nil {
+				queueStopped = true
+				localAdmissionRejected = true
+				call.Status, call.Error = http.StatusServiceUnavailable, queueErr.Error()
+				if errors.Is(queueErr, context.DeadlineExceeded) {
+					call.Error = "provider request queue wait timed out"
+				}
+				hw.Header().Set("Retry-After", "1")
+				writeError(hw, from, call.Status, call.Error)
 			}
 			stop()
 		}
@@ -1295,6 +1311,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// the agent went away: nobody failed, and nobody else is asked
 			call.Status, call.Error = 499, "the agent canceled the request"
 			try.Status, try.Error, try.Fail = call.Status, call.Error, failCanceled
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			break
+		}
+		if queueStopped {
+			hw.release()
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			break
 		}
@@ -1528,6 +1549,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			t.Served, t.Swapped, t.Routed = t.Tries[n-1].Served, t.Tries[n-1].Swapped, t.Tries[n-1].Routed
 		}
 	})
+	if localAdmissionRejected {
+		turnedAway()
+		return
+	}
 	s.record(call)
 	if call.To != "" {
 		rec := usage.Record{RouteID: tr.ID, Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: model,

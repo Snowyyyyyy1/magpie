@@ -111,7 +111,14 @@ type Account struct {
 var (
 	provMu    sync.Mutex
 	provCache []Provider
-	provGood  bool
+	// Validity and an in-flight refresh are separate: failed reads keep the
+	// old list, then a later Cached call retries after a short cooldown.
+	provGood    bool
+	provBusy    bool
+	provRetryAt time.Time
+	// provEpoch counts the invalidations (forgetProviders), so a refresh
+	// that began before one doesn't put what it read over the newer state.
+	provEpoch uint64
 )
 
 func providersPath() string { return filepath.Join(settings.Dir(), "plugin-providers.json") }
@@ -129,6 +136,8 @@ func ListedAt() (time.Time, bool) {
 func forgetProviders() {
 	provMu.Lock()
 	provGood = false
+	provRetryAt = time.Time{}
+	provEpoch++
 	provMu.Unlock()
 }
 
@@ -139,15 +148,87 @@ func Providers(ctx context.Context) ([]Provider, error) {
 	if err := Call(ctx, "providers", map[string]any{"proxies": listingProxies()}, &ps); err != nil {
 		return nil, err
 	}
+	ps = commitProviders(ps, nil)
+	return ps, nil
+}
+
+// commitProviders keeps ps for Cached and on disk, with a list a plugin
+// fell back to replaced by the one it told last, and gives what was kept.
+// epoch, when given, is the invalidation the read began under: a newer
+// one that went by meanwhile stands, and ps is then only given back.
+func commitProviders(ps []Provider, epoch *uint64) []Provider {
 	provMu.Lock()
+	if epoch != nil && provEpoch != *epoch {
+		provMu.Unlock()
+		return ps
+	}
 	ps = keepListed(ps, provCache)
 	ps = keepUnloaded(ps, provCache)
 	provCache, provGood = ps, true
-	provMu.Unlock()
 	if b, err := json.Marshal(ps); err == nil {
 		_ = writeWhole(providersPath(), b)
 	}
-	return ps, nil
+	provMu.Unlock()
+	return ps
+}
+
+// refreshDeadline bounds one background provider refresh: a plugin host
+// that stays alive but never answers the providers call must not leave
+// the refresh (and Refreshed, and Settle) waiting for ever.
+var refreshDeadline = 30 * time.Second
+
+// refreshTries is how many times one background refresh asks before it
+// gives up until a later Cached call; refreshBackoff is how long it waits
+// before the second ask, doubled for each one after.
+var (
+	refreshTries    = 3
+	refreshBackoff  = 250 * time.Millisecond
+	refreshCooldown = 30 * time.Second
+)
+
+// refreshProviders is one bounded ask of the plugins for their providers,
+// kept for Cached when it was answered while the invalidation it began
+// under still stood. Tests replace it to stall or fail an ask without Bun.
+var refreshProviders = func(ctx context.Context, epoch uint64) error {
+	var ps []Provider
+	if err := Call(ctx, "providers", map[string]any{"proxies": listingProxies()}, &ps); err != nil {
+		return err
+	}
+	commitProviders(ps, &epoch)
+	return nil
+}
+
+// refreshProvidersInBackground asks the plugins for their providers with
+// a deadline, retrying a failure with backoff a bounded number of times.
+// A failure keeps the providers already kept, as it keeps the ones on
+// disk; a newer invalidation during the refresh is not overwritten by it.
+func refreshProvidersInBackground(epoch uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), refreshDeadline)
+	defer cancel()
+	wait := refreshBackoff
+	for try := 0; try < refreshTries; try++ {
+		if try > 0 {
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return
+			}
+			wait *= 2
+		}
+		err := refreshProviders(ctx, epoch)
+		if err == nil {
+			return
+		}
+		// a failure keeps what is kept already, and is retried; one that
+		// began before a newer invalidation stops here rather than going
+		// on with answers for a state that is gone
+		provMu.Lock()
+		stale := provEpoch != epoch
+		provMu.Unlock()
+		if stale {
+			return
+		}
+	}
 }
 
 // ProxyFor is the proxy choice (netproxy.With's) of the provider's
@@ -246,6 +327,10 @@ func keepUnloaded(ps, last []Provider) []Provider {
 func UseCached(ps []Provider) {
 	provMu.Lock()
 	provCache, provGood = ps, ps != nil
+	provRetryAt = time.Time{}
+	// a refresh in flight began under what this replaces: what it read
+	// must not go over it
+	provEpoch++
 	provMu.Unlock()
 	// as asked with the plugins as they are now
 	listSeen.Lock()
@@ -261,7 +346,9 @@ var refreshing sync.WaitGroup
 func Refreshed() { refreshing.Wait() }
 
 // Settle waits for Cached's refreshes to end, then stops the host: for
-// tests, whose folders the host runs in go when they end.
+// tests, whose folders the host runs in go when they end. Each ask is
+// bounded and the retries are few, so this waits a bounded time even for
+// a host that never answers.
 func Settle() {
 	refreshing.Wait()
 	Restart()
@@ -324,17 +411,34 @@ func Cached() []Provider {
 		out = append(out, p)
 	}
 	if !good && len(Load().Plugins) > 0 {
-		// refreshed in the background: a sign-in or the plugins changed
-		refreshing.Add(1)
-		go func() {
-			defer refreshing.Done()
-			if Running() || HasBun() {
-				_, _ = Providers(context.Background())
-			}
-		}()
+		// refreshed in the background: a sign-in or the plugins changed.
+		// Whether one is already in flight is read and set under one lock,
+		// so two callers asking at once start one refresh, not two.
 		provMu.Lock()
-		provGood = true // one refresh at a time; a failure is retried on the next change
+		start := !provBusy && !provGood && !time.Now().Before(provRetryAt)
+		if start {
+			provBusy = true
+			refreshing.Add(1)
+		}
+		epoch := provEpoch
 		provMu.Unlock()
+		if start {
+			go func() {
+				defer func() {
+					provMu.Lock()
+					provBusy = false
+					if provEpoch == epoch && !provGood {
+						provRetryAt = time.Now().Add(refreshCooldown)
+					}
+					provMu.Unlock()
+					refreshing.Done()
+				}()
+				if Running() || HasBun() {
+					refreshProvidersInBackground(epoch)
+					return
+				}
+			}()
+		}
 	}
 	return out
 }

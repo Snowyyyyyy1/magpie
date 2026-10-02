@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -473,6 +474,17 @@ func (s *Server) videoStatus(ctx context.Context, p provider.Provider, vendorID 
 
 // videosCreate starts a video and answers with its id.
 func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
+	inputBody, release, admitted := s.requestBody(w, r, provider.Chat)
+	if !admitted {
+		return
+	}
+	defer release()
+	r.Body = io.NopCloser(bytes.NewReader(inputBody))
+	defer func() {
+		if r.MultipartForm != nil {
+			r.MultipartForm.RemoveAll()
+		}
+	}()
 	start := time.Now()
 	f, err := readFilming(r)
 	if err != nil {

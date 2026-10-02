@@ -124,7 +124,11 @@ func Append(r Record) {
 		return
 	}
 	defer f.Close()
-	f.Write(append(b, '\n'))
+	before, _ := f.Stat()
+	if _, err := f.Write(append(b, '\n')); err == nil {
+		after, _ := f.Stat()
+		noteLogAppend(Path(), before, after)
+	}
 }
 
 // IsRejected also recognizes local rejections written before the explicit flag.
@@ -349,28 +353,49 @@ type Summary struct {
 	Sessions []Group `json:"sessions"`
 }
 
-// Summarize sums the log over a period, as of now.
+// Summarize caches the four periods over an indexed log snapshot. Callers
+// receive their own result slices, without retaining historical Records.
 func Summarize(p Period) Summary {
-	return summarize(p, time.Now(), Load(time.Time{}))
+	return indexedSummary(p)
 }
 
 func summarize(p Period, now time.Time, recs []Record) Summary {
-	// a provider renamed since is counted under the id it has now
-	if renamed := provider.Renamed(); len(renamed) > 0 {
-		recs = slices.Clone(recs)
-		for i, r := range recs {
-			if id, ok := renamed[r.Provider]; ok {
-				recs[i].Provider = id
-			}
-		}
-	}
-	s := Summary{Period: p, Bucket: "day", Agents: []Group{}, Models: []Group{}, ProviderKeys: []Group{}, CallerKeys: []Group{}, Sessions: []Group{}, Series: []Point{}}
 	var first time.Time
+	keys := map[string]bool{}
 	for _, r := range recs {
 		if !r.IsRejected() && (first.IsZero() || r.Time.Before(first)) {
 			first = r.Time
 		}
+		if r.ProviderKeyID != "" {
+			keys[r.Provider] = true
+		}
 	}
+	return summarizeFrom(p, now, first, keys, func(fn func(Record)) {
+		for _, r := range recs {
+			fn(r)
+		}
+	})
+}
+
+func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[string]bool, read func(func(Record))) Summary {
+	renamed := provider.Renamed()
+	normalizedKeys := map[string]bool{}
+	for id := range historicalKeys {
+		if next, ok := renamed[id]; ok {
+			id = next
+		}
+		normalizedKeys[id] = true
+	}
+	historicalKeys = normalizedKeys
+	visit := func(fn func(Record)) {
+		read(func(r Record) {
+			if next, ok := renamed[r.Provider]; ok {
+				r.Provider = next
+			}
+			fn(r)
+		})
+	}
+	s := Summary{Period: p, Bucket: "day", Agents: []Group{}, Models: []Group{}, ProviderKeys: []Group{}, CallerKeys: []Group{}, Sessions: []Group{}, Series: []Point{}}
 	s.Since, s.Bucket, s.Series = timeline(p, now, first)
 	if p != Today && p != Week && p != Month {
 		s.Period = All
@@ -379,9 +404,9 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 	priceOf := pricer()
 	// the places each provider id went in the period, and goes now
 	hosts := map[string]map[string]bool{}
-	for _, r := range recs {
+	visit(func(r Record) {
 		if r.IsRejected() {
-			continue
+			return
 		}
 		if r.Host != "" && !r.Time.Before(s.Since) {
 			if hosts[r.Provider] == nil {
@@ -389,30 +414,28 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 			}
 			hosts[r.Provider][who(r.Host)] = true
 		}
-	}
+	})
 	goesNow := map[string]string{}
 	keyProviders := map[string]bool{}
 	for _, p := range provider.All() {
 		goesNow[p.ID] = who(p.Where())
 		keyProviders[p.ID] = p.Account == nil && p.Key != ""
 	}
-	for _, r := range recs {
-		if r.ProviderKeyID != "" {
-			keyProviders[r.Provider] = true
-		}
+	for id := range historicalKeys {
+		keyProviders[id] = true
 	}
 	agents := map[string]*Group{}
 	models := map[string]*Group{}
 	keys := map[string]*Group{}
 	callerKeys := map[string]*Group{}
 	sessions := map[string]*Group{}
-	for _, r := range recs {
+	visit(func(r Record) {
 		if r.IsRejected() {
-			continue
+			return
 		}
 		t := r.Time.In(now.Location())
 		if t.Before(s.Since) {
-			continue
+			return
 		}
 		pr := priceOf(r)
 		s.Totals.add(r, pr)
@@ -464,7 +487,7 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 			}
 			g.add(r, pr)
 		}
-	}
+	})
 	for _, g := range agents {
 		s.Agents = append(s.Agents, *g)
 	}
@@ -520,9 +543,9 @@ type Via struct {
 // agent id and the session's id ("codex|<id>"), the most calls first.
 func Vias(since time.Time) map[string][]Via {
 	out := map[string][]Via{}
-	for _, r := range Load(since) {
+	readLogSnapshot().visit(since, func(r Record) {
 		if r.IsRejected() || r.Session == "" || r.Model == "" {
-			continue
+			return
 		}
 		k := AgentOf(r.Agent) + "|" + r.Session
 		vs := out[k]
@@ -536,7 +559,7 @@ func Vias(since time.Time) map[string][]Via {
 			vs[i].Last = r.Time
 		}
 		out[k] = vs
-	}
+	})
 	for _, vs := range out {
 		sort.SliceStable(vs, func(i, j int) bool { return vs[i].Calls > vs[j].Calls })
 	}

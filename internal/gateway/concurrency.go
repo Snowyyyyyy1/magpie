@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -12,7 +14,7 @@ import (
 // risk-controlled past five or six requests at once) is how many requests
 // may be out at the vendor at once on each of its keys or accounts — the
 // key, the account, else the provider: a candidate's who(). One more waits
-// in a queue of no bound, in the order it came, and is sent when one out
+// in a bounded queue, in the order it came, and is sent when one out
 // is done: its reply read to the end, or the agent gone. A request whose
 // agent goes away while it waits leaves the queue and is never sent.
 //
@@ -24,9 +26,18 @@ import (
 
 // lanes are the slots of each key or account with a limit.
 type lanes struct {
-	mu sync.Mutex
-	m  map[string]*lane
+	mu          sync.Mutex
+	m           map[string]*lane
+	maxWaiting  int
+	waitTimeout time.Duration
 }
+
+const (
+	defaultWaitingLimit = 64
+	defaultWaitTimeout  = 2 * time.Minute
+)
+
+var errQueueFull = errors.New("provider request queue is full")
 
 // lane is one key's or account's: how many are out, and who waits, first
 // first.
@@ -38,8 +49,17 @@ type lane struct {
 
 // acquire waits for one of who's limit slots, in turn. It answers the
 // release, to call once the request is done with the vendor, and false
-// with no slot taken when ctx ended first. A limit of 0 takes no slot.
+// with no slot taken when canceled, timed out, or full. A limit of 0
+// takes no slot.
 func (l *lanes) acquire(ctx context.Context, who string, limit int) (release func(), ok bool) {
+	release, err := l.acquireBounded(ctx, who, limit)
+	return release, err == nil
+}
+
+func (l *lanes) acquireBounded(ctx context.Context, who string, limit int) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	l.mu.Lock()
 	if l.m == nil {
 		l.m = map[string]*lane{}
@@ -52,7 +72,7 @@ func (l *lanes) acquire(ctx context.Context, who string, limit int) (release fun
 			ln.grant()
 		}
 		l.mu.Unlock()
-		return func() {}, true
+		return func() {}, nil
 	}
 	if ln == nil {
 		ln = &lane{}
@@ -63,15 +83,31 @@ func (l *lanes) acquire(ctx context.Context, who string, limit int) (release fun
 	if ln.busy < limit && len(ln.queue) == 0 {
 		ln.busy++
 		l.mu.Unlock()
-		return l.releaser(who, ln), true
+		return l.releaser(who, ln), nil
+	}
+	maxWaiting := l.maxWaiting
+	if maxWaiting <= 0 {
+		maxWaiting = defaultWaitingLimit
+	}
+	if len(ln.queue) >= maxWaiting {
+		l.mu.Unlock()
+		return nil, errQueueFull
 	}
 	ch := make(chan struct{})
 	ln.queue = append(ln.queue, ch)
 	l.mu.Unlock()
+	waitTimeout := l.waitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = defaultWaitTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
+	defer cancel()
 	select {
 	case <-ch:
-		return l.releaser(who, ln), true
-	case <-ctx.Done():
+		if waitCtx.Err() == nil {
+			return l.releaser(who, ln), nil
+		}
+	case <-waitCtx.Done():
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -79,14 +115,14 @@ func (l *lanes) acquire(ctx context.Context, who string, limit int) (release fun
 		if c == ch {
 			ln.queue = append(ln.queue[:i], ln.queue[i+1:]...)
 			l.drop(who, ln)
-			return nil, false
+			return nil, waitCtx.Err()
 		}
 	}
 	// granted as ctx ended: the slot is given on to the next
 	ln.busy--
 	ln.grant()
 	l.drop(who, ln)
-	return nil, false
+	return nil, waitCtx.Err()
 }
 
 // releaser gives the slot back, once however often it is called.

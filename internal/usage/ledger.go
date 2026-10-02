@@ -234,69 +234,19 @@ func logRecord(c sessions.Call) Record {
 // and an end within 2s. Fallback matches must be unique in both logs: an
 // ambiguous direct call stays visible. One gateway entry consumes one file call.
 func gatewayMatches(recs []Record, logs []sessions.Call) map[int]bool {
-	byID, bySession := map[string][]int{}, map[string][]int{}
+	gateway, local := &rowChunk{}, &rowChunk{}
 	for i, r := range recs {
-		if r.IsRejected() {
-			continue
-		}
-		if r.RequestID != "" {
-			byID[r.RequestID] = append(byID[r.RequestID], i)
-		}
-		session := r.NativeSession
-		if session == "" {
-			session = r.Session
-		}
-		if session != "" {
-			bySession[session] = append(bySession[session], i)
-		}
+		r.Agent = AgentOf(r.Agent)
+		gateway.add(Row{Record: r}, "", int64(i), false)
 	}
-	matched, used := map[int]bool{}, map[int]bool{}
-	for j, c := range logs {
-		if c.RequestID == "" {
-			continue
-		}
-		for _, i := range byID[c.RequestID] {
-			if !used[i] {
-				matched[j], used[i] = true, true
-				break
-			}
-		}
+	for i, c := range logs {
+		r := logRecord(c)
+		r.Agent = c.Agent // the native log already names its agent
+		local.add(Row{Record: r}, c.Msg, int64(i), c.Error != "")
 	}
-	candidates := map[int][]int{}
-	counts := map[int]int{}
-	for j, c := range logs {
-		if matched[j] || c.Session == "" {
-			continue
-		}
-		for _, i := range bySession[c.Session] {
-			r := recs[i]
-			if used[i] || c.RequestID != "" && r.RequestID != "" {
-				continue
-			}
-			// Empty successes carry too little evidence. Failed calls may have
-			// zero tokens, but both sources must agree that the call failed.
-			if c.Input+c.Output+c.CacheRead+c.CacheWrite == 0 && (c.Error == "" || !r.Failed()) {
-				continue
-			}
-			if (c.Error != "") != r.Failed() {
-				continue
-			}
-
-			if AgentOf(r.Agent) != c.Agent || r.Input != c.Input || r.Output != c.Output || r.CacheRead != c.CacheRead || r.CacheWrite != c.CacheWrite {
-				continue
-			}
-			end := r.Time.Add(time.Duration(r.Millis) * time.Millisecond)
-			if c.Time.Before(end.Add(-2*time.Second)) || c.Time.After(end.Add(2*time.Second)) {
-				continue
-			}
-			candidates[j] = append(candidates[j], i)
-			counts[i]++
-		}
-	}
-	for j, cs := range candidates {
-		if len(cs) == 1 && counts[cs[0]] == 1 {
-			matched[j] = true
-		}
+	matched := map[int]bool{}
+	for ref := range matchedBlocks([]*rowChunk{gateway}, []*rowChunk{local}, nil, time.Time{}, false) {
+		matched[ref.Index] = true
 	}
 	return matched
 }

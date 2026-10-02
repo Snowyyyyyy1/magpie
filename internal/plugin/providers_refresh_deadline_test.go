@@ -276,7 +276,6 @@ func TestRefreshFailureDuringInvalidationCanRecover(t *testing.T) {
 	Cached()
 	<-started
 	forgetProviders()
-	Cached() // the change is observed while the old refresh still owns the slot
 	close(release)
 	Refreshed()
 	if asks.Load() != 2 || Cached()[0].Name != "Recovered" {

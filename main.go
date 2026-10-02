@@ -153,6 +153,10 @@ func run(args []string) error {
 	gateway.StandIn = agent.StandIn
 	// the setup kept the same on every computer, by whichever serves
 	gateway.WhileServing = append(gateway.WhileServing, davsync.Run)
+	// and dsh's patch lists, which dsh reads live: a route left behind by
+	// something else writing the file fails every session there until
+	// magpie writes its own list again
+	gateway.WhileServing = append(gateway.WhileServing, agent.KeepDshWired)
 	// and the request archive, when it is on, goes to the bucket sync is to
 	gateway.ArchiveBucket = func() (gateway.Putter, bool) {
 		if b, ok := davsync.S3Bucket(); ok {

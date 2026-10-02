@@ -190,7 +190,7 @@ func TestDshModelLimits(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := yaml.Marshal(dshRouteConfig())
+	b, _ := yaml.Marshal(dshRouteConfig(magpieModels("dsh")))
 	s := string(b)
 	want := `    - id: v/see
       name: see · V
@@ -257,5 +257,66 @@ func TestDshProfileMadeLater(t *testing.T) {
 	}
 	if d := a.Check(); d != "" {
 		t.Fatalf("after the sync: %s", d)
+	}
+}
+
+// A dsh before 0.1.5 keeps its endpoint in config.yaml. With no catalog there
+// is nothing to write into that entry, so the effort change is refused rather
+// than blanking the models magpie put there.
+func TestDshSetEffortLeavesALegacyEntryWithNoCatalogAlone(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if n := len(magpieModels("dsh")); n != 0 {
+		t.Fatalf("a catalog to write from: %d models", n)
+	}
+	dir := filepath.Join(home, ".dsh")
+	path := filepath.Join(dir, "config.yaml")
+	own := "# mine\n- id: llm-deepseek # magpie\n  config:\n    models:\n      - id: \"deepseek/pro\"\n"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := dshSetEffort(dir, "high"); err == nil {
+		t.Fatal("an empty catalog should refuse the write")
+	}
+	if b, _ := os.ReadFile(path); string(b) != own {
+		t.Fatalf("the file changed:\n%s", b)
+	}
+}
+
+// With a catalog the legacy entry is rewritten as before.
+func TestDshSetEffortWritesALegacyEntryWithTheCatalog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro", "flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".dsh")
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# mine\n- id: llm-deepseek # magpie\n  config:\n    models:\n      - id: \"deepseek/pro\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := dshSetEffort(dir, "high"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	s := string(b)
+	for _, want := range []string{"# mine", "- id: llm-deepseek # magpie", "reasoningEffort: high", `- id: "deepseek/pro"`, `- id: "deepseek/flash"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in\n%s", want, s)
+		}
 	}
 }

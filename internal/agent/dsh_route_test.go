@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -258,5 +260,246 @@ func TestDshCheckSaysWhenTheModelItStartsOnIsOneMagpieNoLongerGives(t *testing.T
 	}
 	if d := a.Check(); d == "" {
 		t.Fatal("a sync that cannot list the model it starts on says nothing")
+	}
+}
+
+// dshRouteFixture is magpie's route listing those models, as dsh's Models
+// page would write it.
+func dshRouteFixture(ids ...string) string {
+	s := "- id: llm-pi-ai\n  name: \"@deepseek-ai/dsh-llm-pi-ai\"\n  config:\n    providers:\n" +
+		"      magpie:\n        displayName: Magpie\n        apiKeyEnv: " + dshKeyRef + "\n        api: openai-completions\n        baseURL: " + gatewayV1() + "\n        models:\n"
+	for _, id := range ids {
+		s += "          - id: " + id + "\n            name: " + id + " · DeepSeek\n"
+	}
+	return s
+}
+
+// dsh reads the patch list live, so a route left behind while magpie runs —
+// by dsh's own Models page, an older magpie — fails every session there with
+// no such configured model until it is written again. It is written again
+// while magpie serves, and the model a session starts on stays the user's.
+func TestDshRouteIsWrittenAgainWhileServing(t *testing.T) {
+	home, dir, web := dshRouteHome(t)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte(dshKeyRef+"=magpie\n"), 0o600)
+	os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
+		dshRouteFixture("deepseek/pro")+
+		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"), 0o644)
+	a := dsh(home)
+	if d := a.Check(); d == "" {
+		t.Fatal("a route without the model it starts on is not named")
+	}
+	dshWiredOnce()
+	b, _ := os.ReadFile(web)
+	s := string(b)
+	if !strings.Contains(s, "deepseek/pro") || !strings.Contains(s, "deepseek/flash") {
+		t.Fatalf("the route is not what magpie writes:\n%s", s)
+	}
+	if !strings.Contains(s, "provider: magpie\n    model: deepseek/flash") {
+		t.Fatalf("the model it starts on is not the user's still:\n%s", s)
+	}
+	if d := a.Check(); d != "" {
+		t.Fatalf("after writing the route again: %s", d)
+	}
+	// what is already what magpie writes is not written again
+	dshWiredOnce()
+	if again, _ := os.ReadFile(web); string(again) != s {
+		t.Fatalf("the same route written again:\n%s", again)
+	}
+}
+
+// The loop is what runs while magpie serves: a patch list changed under it
+// is written again on the next round, not only at the next start.
+func TestKeepDshWiredWritesTheRouteAgain(t *testing.T) {
+	home, dir, web := dshRouteHome(t)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte(dshKeyRef+"=magpie\n"), 0o600)
+	os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
+		dshRouteFixture("deepseek/pro", "deepseek/flash")+
+		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"), 0o644)
+	a := dsh(home)
+	if d := a.Check(); d != "" {
+		t.Fatalf("the route magpie writes is not clean: %s", d)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() { stop(); <-done })
+	go func() { defer close(done); keepDshWired(ctx, 10*time.Millisecond) }()
+	time.Sleep(100 * time.Millisecond) // a round or two with the route already right
+	// something else writes the file while magpie serves
+	os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
+		dshRouteFixture("deepseek/pro")+
+		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"), 0o644)
+	if d := a.Check(); d == "" {
+		t.Fatal("the route changed under magpie is not named")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for a.Check() != "" {
+		if time.Now().After(deadline) {
+			t.Fatal("the route was not written again while magpie served")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if b, _ := os.ReadFile(web); !strings.Contains(string(b), "deepseek/flash") {
+		t.Fatalf("the route written again:\n%s", b)
+	}
+}
+
+// A patch list without magpie's route is the user's: writing the route again
+// does not put it back.
+func TestDshRouteAgainLeavesAListWithoutMagpieAlone(t *testing.T) {
+	_, _, web := dshRouteHome(t)
+	mine := "# Your patch layer for this dsh profile.\n- id: mine\n  config:\n    model: m\n"
+	os.WriteFile(web, []byte(mine), 0o644)
+	dshWiredOnce()
+	if b, _ := os.ReadFile(web); string(b) != mine {
+		t.Fatalf("a list without magpie's route:\n%s", b)
+	}
+}
+
+// A route is written from the catalog: with no providers there is no list to
+// write, and an empty one would be worse than the route left as it is.
+func TestDshRouteAgainLeavesTheRouteWithNoCatalog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if n := len(magpieModels("dsh")); n != 0 {
+		t.Fatalf("a catalog to write from: %d models", n)
+	}
+	stale := "# Your patch layer for this dsh profile.\n" +
+		dshRouteFixture("deepseek/pro") +
+		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"
+	web := filepath.Join(home, ".dsh", "profiles", "web", "cordis.patch.yml")
+	os.MkdirAll(filepath.Dir(web), 0o755)
+	os.WriteFile(web, []byte(stale), 0o644)
+	if _, err := dshRouteAgain(web, magpieModels("dsh")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(web); string(b) != stale {
+		t.Fatalf("a route written with no catalog:\n%s", b)
+	}
+	if err := dshSync(filepath.Join(home, ".dsh")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(web); string(b) != stale {
+		t.Fatalf("the sync wrote a route with no catalog:\n%s", b)
+	}
+	dshWiredOnce()
+	if b, _ := os.ReadFile(web); string(b) != stale {
+		t.Fatalf("a route written with no catalog:\n%s", b)
+	}
+}
+
+// dsh's own writers keep a patch list in flow style (#445). A route that is
+// what magpie writes is read out of it as the same list; whatever the round
+// writes, the round after it writes nothing: a list that came back different
+// every time would be written again every 30 seconds.
+func TestDshRouteAgainSettlesOnAFlowList(t *testing.T) {
+	home, dir, web := dshRouteHome(t)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte(dshKeyRef+"=magpie\n"), 0o600)
+	os.WriteFile(web, []byte("# Your patch layer for this dsh profile\n# a top-level YAML array\n"+
+		"[ { id: llm-pi-ai, name: \"@deepseek-ai/dsh-llm-pi-ai\", config: { providers: { magpie: { displayName: Magpie, apiKeyEnv: "+
+		dshKeyRef+", api: openai-completions, baseURL: "+gatewayV1()+
+		", models: [ { id: deepseek/pro, name: pro }, { id: deepseek/flash, name: flash } ] } } } }, { id: agent-default-model, config: { provider: magpie, model: deepseek/flash } } ]\n"), 0o644)
+	a := dsh(home)
+	if d := a.Check(); d != "" {
+		t.Fatalf("a route magpie writes, kept in flow style: %s", d)
+	}
+	dshWiredOnce()
+	first, _ := os.ReadFile(web)
+	if !strings.Contains(string(first), "deepseek/pro") || !strings.Contains(string(first), "deepseek/flash") {
+		t.Fatalf("the route read out of a flow list:\n%s", first)
+	}
+	dshWiredOnce()
+	if second, _ := os.ReadFile(web); string(second) != string(first) {
+		t.Fatalf("a flow list written again and again:\n%s", second)
+	}
+}
+
+// A profile dsh made after magpie wired the others is filled with the route
+// and the model they start on. With no catalog there is nothing to fill it
+// with: a list of no models, and a default pointing at one, is what a session
+// there fails on. A route written again never reaches this profile.
+func TestDshFillNewProfilesLeavesABareProfileWithNoCatalog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if n := len(magpieModels("dsh")); n != 0 {
+		t.Fatalf("a catalog to write from: %d models", n)
+	}
+	dir := filepath.Join(home, ".dsh")
+	web := filepath.Join(dir, "profiles", "web", "cordis.patch.yml")
+	desktop := filepath.Join(dir, "profiles", "desktop", "cordis.patch.yml")
+	for _, f := range []string{web, desktop} {
+		os.MkdirAll(filepath.Dir(f), 0o755)
+	}
+	os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
+		dshRouteFixture("deepseek/pro")+
+		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/pro\n"), 0o644)
+	bare := "# A new profile.\n[]\n"
+	os.WriteFile(desktop, []byte(bare), 0o644)
+	if err := dshSync(dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(desktop); string(b) != bare {
+		t.Fatalf("a new profile filled with no catalog:\n%s", b)
+	}
+}
+
+// The other way round: with a catalog the new profile is filled as before.
+func TestDshFillNewProfilesFillsABareProfile(t *testing.T) {
+	home, dir, web := dshRouteHome(t)
+	desktop := filepath.Join(dir, "profiles", "desktop", "cordis.patch.yml")
+	os.MkdirAll(filepath.Dir(desktop), 0o755)
+	os.WriteFile(web, []byte("# Your patch layer for this dsh profile.\n"+
+		dshRouteFixture("deepseek/pro", "deepseek/flash")+
+		"- id: agent-default-model\n  config:\n    provider: magpie\n    model: deepseek/flash\n"), 0o644)
+	os.WriteFile(desktop, []byte("# A new profile.\n[]\n"), 0o644)
+	if err := dshSync(dir); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(desktop)
+	for _, want := range []string{"id: llm-pi-ai", "displayName: Magpie", "      magpie:", "provider: magpie", "id: deepseek/pro"} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("a new profile not filled with %q:\n%s", want, b)
+		}
+	}
+	if d := dsh(home).Check(); d != "" {
+		t.Fatalf("check: %s", d)
+	}
+}
+
+func TestDshWriteErrorReadsTheSameEveryRound(t *testing.T) {
+	one := dshWriteError(&os.PathError{Op: "open", Path: "/x/.cordis.patch.yml.4236419057.tmp", Err: os.ErrPermission})
+	two := dshWriteError(&os.PathError{Op: "open", Path: "/x/.cordis.patch.yml.3958428140.tmp", Err: os.ErrPermission})
+	if one != two {
+		t.Fatalf("the same trouble reads two ways: %q and %q", one, two)
+	}
+	if strings.Contains(one, ".tmp") {
+		t.Fatalf("what is said carries the temporary name: %q", one)
+	}
+	if !strings.Contains(one, "permission denied") {
+		t.Fatalf("what is said does not say why: %q", one)
+	}
+}
+
+func TestDshSaidOnceSaysATroubleOnce(t *testing.T) {
+	var said dshSaidOnce
+	const trouble = "writing dsh's route again in /x: open: permission denied"
+	if !said.first(trouble) {
+		t.Fatal("the first round said nothing")
+	}
+	if said.first(trouble) {
+		t.Fatal("the same trouble was said again")
+	}
+	if said.first("") {
+		t.Fatal("a quiet round said something")
+	}
+	if !said.first(trouble) {
+		t.Fatal("trouble after a quiet round was not said")
 	}
 }

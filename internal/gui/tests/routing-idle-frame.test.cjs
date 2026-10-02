@@ -86,7 +86,7 @@ test("the loop's frame is still there to be counted, and asks for itself", async
 for (const engine of engines) for (const lang of ["en", "zh"]) {
   test(`${engine} ${lang}: with Agents selected the Routing loop asks for no more frames, and picking Routing again resumes it`, async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-    const context = await browser.newContext({ viewport: { width: 1100, height: 760 } });
+    const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
     await context.addInitScript(init);
     const page = await context.newPage();
     page.setDefaultTimeout(5000);
@@ -154,7 +154,7 @@ const hiddenWays = {
 async function routingPage(t, engine, lang, feed, view = "routing") {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   t.after(() => browser.close());
-  const context = await browser.newContext({ viewport: { width: 1100, height: 760 } });
+  const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await context.addInitScript(init);
   const page = await context.newPage();
   page.setDefaultTimeout(5000);

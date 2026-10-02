@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -82,7 +84,9 @@ func TestRefreshTimeoutKeepsProviders(t *testing.T) {
 	var asks atomic.Int64
 	refreshSandbox(t, func(ctx context.Context, _ uint64) error {
 		asks.Add(1)
-		<-ctx.Done() // the host never answers
+		ctx, cancel := context.WithTimeout(ctx, refreshDeadline)
+		defer cancel()
+		<-ctx.Done() // the providers RPC never answers
 		return ctx.Err()
 	})
 
@@ -108,8 +112,7 @@ func TestRefreshTimeoutKeepsProviders(t *testing.T) {
 	if n := asks.Load(); n != 1 {
 		t.Fatalf("the stalled providers call was asked %d times, want one bounded stall", n)
 	}
-	// the deadline ended each ask, rather than the call going unanswered:
-	// the retries were the deadline's, not a second stall
+	// A timed-out RPC ends this refresh without starting another stalled ask.
 	if refreshCacheGood() {
 		t.Fatal("the failed refresh marked stale providers current")
 	}
@@ -273,11 +276,107 @@ func TestRefreshFailureDuringInvalidationCanRecover(t *testing.T) {
 	Cached()
 	<-started
 	forgetProviders()
+	Cached() // the change is observed while the old refresh still owns the slot
 	close(release)
-	Refreshed()
-	Cached()
 	Refreshed()
 	if asks.Load() != 2 || Cached()[0].Name != "Recovered" {
 		t.Fatal("older failure swallowed the newer invalidation", asks.Load(), Cached())
+	}
+}
+
+// Use the real Call/get/startOn path: replacing refreshProviders cannot prove
+// that a providers deadline leaves the host's initialization budget intact.
+func realRefreshPlugin(t *testing.T, initMillis, callMillis int) {
+	t.Helper()
+	sandbox(t)
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+	if err := os.MkdirAll(filepath.Dir(catalog.CachePath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalog.CachePath(), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := filepath.Join(t.TempDir(), "plugin.mjs")
+	js := fmt.Sprintf(`export default async () => {
+  await new Promise(r => setTimeout(r, %d));
+  return {
+   config(c) { c.provider ??= {}; c.provider.slow = { name: "Slow", models: { "slow-1": { name: "Slow One" } } }; },
+   auth: { provider: "slow", methods: [{ type: "api", label: "API key" }] },
+   provider: { id: "slow", models: async p => { await new Promise(r => setTimeout(r, %d)); return p.models; } }
+  };
+ };`, initMillis, callMillis)
+	if err := os.WriteFile(spec, []byte(js), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(settings.Dir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	refreshWriteList(t, spec)
+	if err := os.WriteFile(AuthPath(), []byte(`{"slow":{"type":"api","key":"fake"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	UseCached(nil)
+}
+
+func TestRefreshDeadlineLeavesHostStartupBudget(t *testing.T) {
+	realRefreshPlugin(t, 1500, 0)
+	old := refreshDeadline
+	refreshDeadline = 500 * time.Millisecond
+	t.Cleanup(func() { refreshDeadline = old })
+	Cached()
+	Refreshed()
+	got := Cached()
+	if !Running() || !refreshCacheGood() || len(got) != 1 || got[0].ID != "slow" {
+		t.Fatalf("providers deadline cut short host startup: %+v, running=%v", got, Running())
+	}
+}
+
+func TestRefreshDeadlineBoundsRealProviderCall(t *testing.T) {
+	realRefreshPlugin(t, 0, 1500)
+	if _, err := Plugins(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	old := refreshDeadline
+	refreshDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { refreshDeadline = old })
+	Cached()
+	done := make(chan struct{})
+	go func() { Refreshed(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("real providers RPC outlived its deadline")
+	}
+	if refreshCacheGood() || !Running() {
+		t.Fatal("RPC timeout published a result or killed the initialized host")
+	}
+}
+
+func TestRefreshInvalidationCancelsStaleCall(t *testing.T) {
+	var asks atomic.Int64
+	started := make(chan struct{})
+	refreshSandbox(t, func(ctx context.Context, epoch uint64) error {
+		if asks.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		commitProviders([]Provider{{ID: "fakeco", Spec: refreshAbsPath(t, "testdata/fake/index.js"), Name: "Recovered"}}, &epoch)
+		return nil
+	})
+	Cached()
+	<-started
+	forgetProviders()
+	Cached()
+	done := make(chan struct{})
+	go func() { Refreshed(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stale listing was not cancelled and followed by the new state")
+	}
+	if asks.Load() != 2 || !refreshCacheGood() || Cached()[0].Name != "Recovered" {
+		t.Fatal(asks.Load(), Cached())
 	}
 }

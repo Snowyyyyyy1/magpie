@@ -109,13 +109,15 @@ type Account struct {
 }
 
 var (
-	provMu    sync.Mutex
-	provCache []Provider
+	provMu      sync.Mutex
+	provWriteMu sync.Mutex
+	provCache   []Provider
 	// Failed reads keep the old list. Cached tries once per invalidation,
 	// with bounded retries, then waits for a sign-in or plugin change.
-	provGood  bool
-	provBusy  bool
-	provTried bool
+	provGood   bool
+	provBusy   bool
+	provTried  bool
+	provCancel context.CancelFunc
 	// provEpoch counts the invalidations (forgetProviders), so a refresh
 	// that began before one doesn't put what it read over the newer state.
 	provEpoch uint64
@@ -138,6 +140,9 @@ func forgetProviders() {
 	provGood = false
 	provTried = false
 	provEpoch++
+	if provCancel != nil {
+		provCancel()
+	}
 	provMu.Unlock()
 }
 
@@ -157,6 +162,9 @@ func Providers(ctx context.Context) ([]Provider, error) {
 // epoch, when given, is the invalidation the read began under: a newer
 // one that went by meanwhile stands, and ps is then only given back.
 func commitProviders(ps []Provider, epoch *uint64) []Provider {
+	// Serialize publishers without blocking Cached on Windows rename retries.
+	provWriteMu.Lock()
+	defer provWriteMu.Unlock()
 	provMu.Lock()
 	if epoch != nil && provEpoch != *epoch {
 		provMu.Unlock()
@@ -165,14 +173,14 @@ func commitProviders(ps []Provider, epoch *uint64) []Provider {
 	ps = keepListed(ps, provCache)
 	ps = keepUnloaded(ps, provCache)
 	provCache, provGood, provTried = ps, true, true
+	provMu.Unlock()
 	if b, err := json.Marshal(ps); err == nil {
 		_ = writeWhole(providersPath(), b)
 	}
-	provMu.Unlock()
 	return ps
 }
 
-// refreshDeadline bounds one background provider refresh: a plugin host
+// refreshDeadline bounds one providers RPC after host initialization: a plugin host
 // that stays alive but never answers the providers call must not leave
 // the refresh (and Refreshed, and Settle) waiting for ever.
 var refreshDeadline = 30 * time.Second
@@ -190,20 +198,18 @@ var (
 // under still stood. Tests replace it to stall or fail an ask without Bun.
 var refreshProviders = func(ctx context.Context, epoch uint64) error {
 	var ps []Provider
-	if err := Call(ctx, "providers", map[string]any{"proxies": listingProxies()}, &ps); err != nil {
+	if err := callWithTimeout(ctx, "providers", map[string]any{"proxies": listingProxies()}, &ps, refreshDeadline); err != nil {
 		return err
 	}
 	commitProviders(ps, &epoch)
 	return nil
 }
 
-// refreshProvidersInBackground asks the plugins for their providers with
+// refreshProvidersWithRetry asks the plugins for their providers with
 // a deadline, retrying a failure with backoff a bounded number of times.
 // A failure keeps the providers already kept, as it keeps the ones on
 // disk; a newer invalidation during the refresh is not overwritten by it.
-func refreshProvidersInBackground(epoch uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), refreshDeadline)
-	defer cancel()
+func refreshProvidersWithRetry(ctx context.Context, epoch uint64) {
 	wait := refreshBackoff
 	for try := 0; try < refreshTries; try++ {
 		if try > 0 {
@@ -215,7 +221,7 @@ func refreshProvidersInBackground(epoch uint64) {
 			wait *= 2
 		}
 		err := refreshProviders(ctx, epoch)
-		if err == nil {
+		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
 		// a failure keeps what is kept already, and is retried; one that
@@ -227,6 +233,29 @@ func refreshProvidersInBackground(epoch uint64) {
 		if stale {
 			return
 		}
+	}
+}
+
+// Keep the same admission across intervening changes, so Refreshed waits for
+// the latest state too. Invalidation cancels only the old listing, not startup.
+func refreshProvidersInBackground(ctx context.Context, epoch uint64) {
+	defer refreshing.Done()
+	for {
+		if Running() || HasBun() {
+			refreshProvidersWithRetry(ctx, epoch)
+		}
+		provMu.Lock()
+		provCancel()
+		if provEpoch != epoch && !provGood && !provTried {
+			epoch = provEpoch
+			ctx, provCancel = context.WithCancel(context.Background())
+			provTried = true
+			provMu.Unlock()
+			continue
+		}
+		provBusy, provCancel = false, nil
+		provMu.Unlock()
+		return
 	}
 }
 
@@ -329,6 +358,9 @@ func UseCached(ps []Provider) {
 	// a refresh in flight began under what this replaces: what it read
 	// must not go over it
 	provEpoch++
+	if provCancel != nil {
+		provCancel()
+	}
 	provMu.Unlock()
 	// as asked with the plugins as they are now
 	listSeen.Lock()
@@ -414,25 +446,16 @@ func Cached() []Provider {
 		// so two callers asking at once start one refresh, not two.
 		provMu.Lock()
 		start := !provBusy && !provGood && !provTried
+		var ctx context.Context
 		if start {
+			ctx, provCancel = context.WithCancel(context.Background())
 			provBusy, provTried = true, true
 			refreshing.Add(1)
 		}
 		epoch := provEpoch
 		provMu.Unlock()
 		if start {
-			go func() {
-				defer func() {
-					provMu.Lock()
-					provBusy = false
-					provMu.Unlock()
-					refreshing.Done()
-				}()
-				if Running() || HasBun() {
-					refreshProvidersInBackground(epoch)
-					return
-				}
-			}()
+			go refreshProvidersInBackground(ctx, epoch)
 		}
 	}
 	return out

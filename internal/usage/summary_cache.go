@@ -13,6 +13,8 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
+const summaryCacheSessions = 1024
+
 type summaryEntry struct {
 	version uint64
 	meta    string
@@ -29,7 +31,7 @@ func indexedSummary(p Period) Summary {
 		p = All
 	}
 	now := time.Now()
-	snapshot := readLogSnapshot()
+	snapshot := logSnapshotFor(true)
 	_, offset := now.Zone()
 	meta := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d", statKey(settings.Path()), statKey(provider.Path()), statKey(catalog.CachePath()), statKey(catalog.LivePath("antigravity")), now.Format("2006-01-02"), now.Location(), offset)
 	// Sign-ins and plugin lists can change independently of providers.json.
@@ -49,7 +51,19 @@ func indexedSummary(p Period) Summary {
 	if ok && old.version == snapshot.version && old.meta == meta {
 		return cloneSummary(old.value)
 	}
+	if snapshot.uncached && len(snapshot.blocks) == 0 {
+		snapshot = readLogSnapshot()
+	}
 	value := summarizeFrom(p, now, snapshot.first, snapshot.keyProviders, func(fn func(Record)) { snapshot.visit(p.Since(now), fn) })
+	// Keep every session in the returned result; limit retained cache data only.
+	if len(value.Sessions) > summaryCacheSessions {
+		summaries.Lock()
+		if previous := summaries.entries[p]; previous.version <= snapshot.version {
+			delete(summaries.entries, p)
+		}
+		summaries.Unlock()
+		return value
+	}
 	summaries.Lock()
 	if summaries.entries == nil {
 		summaries.entries = map[Period]summaryEntry{}

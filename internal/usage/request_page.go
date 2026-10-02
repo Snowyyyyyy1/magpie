@@ -177,7 +177,7 @@ type requestIndex struct {
 
 var requestCache requestIndex
 
-const requestCacheBytes = 24 << 20
+var requestCacheBytes int64 = 24 << 20
 
 func statKey(path string) string {
 	s, e := os.Stat(path)
@@ -240,8 +240,9 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	}
 	meta += fmt.Sprintf("|%x|%s", h.Sum(nil), statKey(catalog.LivePath("antigravity")))
 	h.Reset()
-	snapshot := readLogSnapshot()
-	fmt.Fprint(h, meta, snapshot.version, time.Now().Format("2006-01-02 MST"))
+	snapshot := logSnapshotFor(true)
+	version := snapshot.version
+	fmt.Fprint(h, meta, version, time.Now().Format("2006-01-02 MST"))
 	for _, s := range sources {
 		fmt.Fprintf(h, "%s:%d:%d;", s.Path, s.Size, s.Modified.UnixNano())
 	}
@@ -277,6 +278,9 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	idx = &requestIndex{root: idx.root, meta: idx.meta, key: idx.key, tick: idx.tick,
 		chunks: maps.Clone(idx.chunks), gateways: maps.Clone(idx.gateways)}
 	shared.Unlock()
+	if snapshot.uncached && len(snapshot.blocks) == 0 {
+		snapshot = readLogSnapshot()
+	}
 	price := pricer()
 	priceRow := func(r Record, source string) Row {
 		sent := r.Model
@@ -431,7 +435,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	shared.Lock()
 	defer shared.Unlock()
 	// A query for an older filesystem snapshot may finish after a newer one.
-	if shared.root != idx.root || shared.meta != idx.meta || shared.key != idx.key {
+	if shared.root != idx.root || shared.meta != idx.meta || shared.key != idx.key || snapshot.version != version {
 		return page
 	}
 	for path, c := range idx.chunks {
@@ -457,8 +461,17 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	if len(shared.pages) >= 16 {
 		shared.pages = map[pageKey]RequestPage{}
 	}
-	shared.pages[q] = page
-	var bytes int64
+	if !snapshot.uncached {
+		shared.pages[q] = page
+	}
+	// Raw blocks are also retained by gateway-map keys: charge their bytes once.
+	bytes := snapshot.bytes
+	budget := int64(requestCacheBytes)
+	if snapshot.uncached {
+		budget = 0
+		shared.pages = nil
+	}
+
 	type cachedChunk struct {
 		path string
 		raw  *rowChunk
@@ -483,7 +496,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 		return strings.Compare(a.path, b.path)
 	})
 	for _, c := range kept {
-		if bytes <= requestCacheBytes {
+		if bytes <= budget {
 			break
 		}
 		if c.raw != nil {

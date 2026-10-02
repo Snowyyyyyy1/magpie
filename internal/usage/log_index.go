@@ -16,7 +16,12 @@ import (
 
 const logBlockRows = 512
 
+// Raw and priced chunks share the request cache budget. Oversized histories
+// remain queryable but their raw blocks are rebuilt instead of retained.
+
 type logSnapshot struct {
+	bytes        int64
+	uncached     bool
 	path         string
 	info         os.FileInfo
 	off          int64
@@ -40,21 +45,27 @@ var logAppends struct {
 	base, last os.FileInfo
 }
 
-func readLogSnapshot() *logSnapshot {
+func readLogSnapshot() *logSnapshot { return logSnapshotFor(false) }
+
+// Metadata-only callers can use cached results without rebuilding a history
+// whose blocks do not fit the cache budget.
+func logSnapshotFor(metadataOnly bool) *logSnapshot {
 	logIndex.Lock()
 	defer logIndex.Unlock()
 	path := Path()
 	info, err := os.Stat(path)
 	old := logIndex.snapshot
-	if old != nil && old.path == path {
-		if err != nil && old.info == nil {
-			return old
-		}
-		if err == nil && old.info != nil && os.SameFile(old.info, info) && old.info.Size() == info.Size() && old.info.ModTime().Equal(info.ModTime()) {
-			return old
-		}
+	unchanged := old != nil && old.path == path && (err != nil && old.info == nil || err == nil && sameLogInfo(old.info, info))
+	if unchanged && info != nil && logChangeStamp(info) == "" {
+		unchanged = old.hash != "" && recordHash(path, info.Size()) == old.hash
 	}
-	logIndex.version++
+	if unchanged && (!old.uncached || metadataOnly) {
+		return old
+	}
+	if !unchanged {
+		logIndex.version++
+	}
+
 	next := &logSnapshot{path: path, info: info, version: logIndex.version, keyProviders: map[string]bool{}}
 	if err != nil {
 		logIndex.snapshot = next
@@ -63,9 +74,9 @@ func readLogSnapshot() *logSnapshot {
 	logAppends.Lock()
 	notePath, noteBase, noteLast := logAppends.path, logAppends.base, logAppends.last
 	logAppends.Unlock()
-	trusted := notePath == path && sameLogInfo(oldInfo(old), noteBase) && sameLogInfo(info, noteLast)
+	trusted := logChangeStamp(info) != "" && notePath == path && sameLogInfo(oldInfo(old), noteBase) && sameLogInfo(info, noteLast)
 	continued := old != nil && old.path == path && old.info != nil && os.SameFile(old.info, info) && info.Size() > old.info.Size() && (trusted || old.hash != "" && recordHash(path, old.info.Size()) == old.hash)
-	if continued {
+	if continued && !old.uncached {
 		next.off, next.first = old.off, old.first
 		next.blocks = slices.Clone(old.blocks)
 		next.keyProviders = maps.Clone(old.keyProviders)
@@ -112,7 +123,7 @@ func readLogSnapshot() *logSnapshot {
 	if tail != nil {
 		next.blocks = append(next.blocks, tail.freeze())
 	}
-	if !trusted {
+	if !trusted || logChangeStamp(info) == "" {
 		next.hash = recordHash(path, info.Size())
 	}
 	logAppends.Lock()
@@ -123,7 +134,17 @@ func readLogSnapshot() *logSnapshot {
 		logAppends.path, logAppends.base, logAppends.last = path, info, info
 	}
 	logAppends.Unlock()
-	logIndex.snapshot = next
+	for _, c := range next.blocks {
+		next.bytes += c.Bytes
+	}
+	if next.bytes > requestCacheBytes {
+		next.uncached = true
+		kept := *next
+		kept.blocks = nil
+		logIndex.snapshot = &kept
+	} else {
+		logIndex.snapshot = next
+	}
 	return next
 }
 
@@ -174,7 +195,7 @@ func oldInfo(s *logSnapshot) os.FileInfo {
 	return s.info
 }
 func sameLogInfo(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) && logChangeStamp(a) == logChangeStamp(b)
 }
 
 // Append records the exact file states around its successful write. Contiguous

@@ -108,3 +108,39 @@ jobs:
         run: |
           sh -n site/public/install.sh
           node --test site/*.test.mjs
+
+  # internal/gui/tests are Playwright regressions over the real pages; the
+  # repo carries no frontend manifest, so Playwright is installed outside the
+  # checkout, at the version the tests are written against. `make test-ui`
+  # discovers every *.test.cjs. A missing browser fails the run, it never
+  # skips to a pass. (The UI preview workflow is for screenshots only.)
+  ui:
+    name: ui (browser regressions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+      PLAYWRIGHT_VERSION: '1.62.1'
+      # A conservative two files at a time; raise it if the runner has room.
+      UI_TEST_CONCURRENCY: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # mobile-web compares against origin/main with `git show`.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright and its browsers
+        run: |
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/pw" "playwright@$PLAYWRIGHT_VERSION"
+          echo "NODE_PATH=$RUNNER_TEMP/pw/node_modules" >> "$GITHUB_ENV"
+          # CJK fonts: many assertions measure Chinese labels.
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium webkit
+
+      - name: Browser regressions
+        run: make test-ui

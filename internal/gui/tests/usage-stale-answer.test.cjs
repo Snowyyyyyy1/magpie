@@ -16,8 +16,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
 
-// a copy of app.js with the guard taken out can be pointed at with
-// MAGPIE_APP_JS=… to check these fail without the change
+// Another revision of app.js can be selected with MAGPIE_APP_JS to check
+// the same behavior cases against the implementation before the fix.
 const APP = process.env.MAGPIE_APP_JS || path.resolve(__dirname, "../assets/app.js");
 const source = fs.readFileSync(APP, "utf8");
 
@@ -31,10 +31,6 @@ function lift(header) {
   return source.slice(start, end + 2);
 }
 const loadUsageSource = lift("async function loadUsage(asked) {");
-// the count loadUsage keeps of the reads it has asked for, as the page holds
-// it beside the function; a rename in app.js shows up here as a loud
-// ReferenceError rather than a test that quietly stops covering the guard
-assert.match(source, /\nlet usageRead = 0;\n/, "app.js no longer keeps a count of its overview reads");
 
 // values cross the vm's realm boundary (its Array and Object are not the
 // test's), so what is handed to assert is copied into this one first

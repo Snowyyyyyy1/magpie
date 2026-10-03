@@ -1380,7 +1380,7 @@ line, the 2 days / Cycle control turning every card without moving the page,
 no curve without readings, the theme's chart colours in light and dark, and
 the tray card's thin current-cycle line, in Chinese and English.
 
-With Node.js and Playwright available, `make test-ui` runs the whole suite:
+With Node.js and Playwright available, `make test-ui` manually runs the whole suite:
 every `internal/gui/tests/*.test.cjs`, discovered automatically. Files are
 independent and run a few at a time (`UI_TEST_CONCURRENCY`, default 2); set
 `UI_TEST_CONCURRENCY=1` to run one at a time when diagnosing a flaky file.
@@ -1402,6 +1402,11 @@ an external directory to retain screenshots and Playwright traces, including
 failed assertions. These browser checks run through `make test-ui`, separately
 from `make test` (which is Go only) and from the UI preview workflow (which
 only records screenshots).
+The Test workflow does not run this suite.
+
+`usage-stale-answer.test.cjs` and `providers-fetching-retry.test.cjs` use Node's
+VM and need no browser. Set `MAGPIE_APP_JS` to another revision's `app.js` to
+run their behavior checks against that source.
 
 The request-ledger review regressions also cover the explicit data-source notes
 (including the exclusion of local rejections), the local-session label, and native

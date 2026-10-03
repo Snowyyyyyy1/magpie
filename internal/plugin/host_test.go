@@ -118,6 +118,13 @@ func (c *call) queued() int {
 	return len(c.queue)
 }
 
+// armed is whether the call's stall watchdog is waiting.
+func (c *call) armed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.watch != nil
+}
+
 // abortsTaken are the aborts the host queued for the child, without waiting:
 // abortLoop is not started in these tests.
 func (f *fakeHost) abortsTaken() []int64 {
@@ -266,23 +273,24 @@ func TestHostBodyCloseEndsAnIdleRead(t *testing.T) {
 }
 
 // TestHostStreamBacklogGivesUpOnThatRequestOnly: a consumer that never reads
-// has its request given up on there and then — the call is dropped, its
-// reader is told which limit it passed, and another call carries on.
+// has its request given up on once the backlog passes the hard cap — the
+// queued encoding is dropped then and there, its reader is told the host
+// queues no more, later chunks are refused, and another call carries on. The
+// cap counts the backlog the queue would hold, one chunk included.
 func TestHostStreamBacklogGivesUpOnThatRequestOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		events int
 		bytes  int
-		fits   int // how many of the reply's chunks are read before the error
 		want   error
 	}{
-		{"too many chunks", 2, 4 << 20, 2, errQueuedEvents},
-		{"too many bytes", 4096, 8, 3, errQueuedBytes}, // 4 base64 bytes a chunk
+		{"too many chunks", 2, 64 << 20, errTooMuchQueued},
+		{"too many bytes", 65536, 8, errTooMuchQueued}, // 4 base64 bytes a chunk
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			oldEvents, oldBytes := maxQueuedEvents, maxQueuedBytes
-			maxQueuedEvents, maxQueuedBytes = tc.events, tc.bytes
-			t.Cleanup(func() { maxQueuedEvents, maxQueuedBytes = oldEvents, oldBytes })
+			oldEvents, oldBytes := hardQueuedEvents, hardQueuedBytes
+			hardQueuedEvents, hardQueuedBytes = tc.events, tc.bytes
+			t.Cleanup(func() { hardQueuedEvents, hardQueuedBytes = oldEvents, oldBytes })
 
 			f := newFakeHost(t)
 			bad, bc := f.begin(true)
@@ -297,6 +305,12 @@ func TestHostStreamBacklogGivesUpOnThatRequestOnly(t *testing.T) {
 				f.answer(bad, "")
 			})
 			waitFor(t, "the given-up call was dropped", func() bool { return !f.registered(bad) })
+			if n := bc.queued(); n != 0 {
+				t.Fatalf("%d chunks were held for a call at the hard cap", n)
+			}
+			if bc.push(message{Data: base64.StdEncoding.EncodeToString([]byte("late"))}) {
+				t.Fatal("a chunk was queued for a call at the hard cap")
+			}
 			if m, ok := oc.pop(); ok {
 				t.Fatalf("a plain call queued a chunk: %+v", m)
 			}
@@ -311,8 +325,11 @@ func TestHostStreamBacklogGivesUpOnThatRequestOnly(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("read = %v, want %v", err, tc.want)
 			}
-			if want := chunks(tc.fits); string(got) != want {
-				t.Fatalf("stream = %q, want the %d chunks that fitted %q", got, tc.fits, want)
+			if len(got) != 0 {
+				t.Fatalf("stream = %q, want nothing: the encoding is dropped at the cap", got)
+			}
+			if got := f.abortsTaken(); len(got) != 1 || got[0] != bad {
+				t.Fatalf("aborts = %v, want just %d", got, bad)
 			}
 		})
 	}
@@ -344,28 +361,51 @@ func TestHostStreamKeepsChunkOrderAndAnswer(t *testing.T) {
 	}
 }
 
-// TestHostStreamTakesOneChunkBiggerThanTheLimit: the bound is the queued
-// backlog, so a reply the plugin sends whole (one chunk bigger than the byte
-// limit) is still delivered rather than given up on.
-func TestHostStreamTakesOneChunkBiggerThanTheLimit(t *testing.T) {
-	oldBytes := maxQueuedBytes
-	maxQueuedBytes = 8
-	t.Cleanup(func() { maxQueuedBytes = oldBytes })
+// TestHostStreamDeliversPastTheSoftWatermark: a reply larger than the soft
+// watermark that the reader keeps up with still arrives whole — the watermark
+// only arms the stall watchdog, it cuts nothing.
+func TestHostStreamDeliversPastTheSoftWatermark(t *testing.T) {
+	oldBytes := softQueuedBytes
+	softQueuedBytes = 16
+	t.Cleanup(func() { softQueuedBytes = oldBytes })
 
 	f := newFakeHost(t)
 	id, c := f.begin(true)
 	b := readBody(f, id, c, context.Background())
-	whole := strings.Repeat("x", 64)
+	whole := strings.Repeat("x", 512) // well past the watermark, under the cap
 	reply(t, f, id, c, func() {
-		f.chunk(id, whole)
+		for range 8 {
+			f.chunk(id, whole)
+		}
 		f.answer(id, "")
 	})
 	got, err := io.ReadAll(b)
 	if err != nil {
-		t.Fatalf("reading a whole reply: %v", err)
+		t.Fatalf("reading a reply past the watermark: %v", err)
 	}
-	if string(got) != whole {
-		t.Fatalf("stream = %q, want %q", got, whole)
+	if want := strings.Repeat(whole, 8); string(got) != want {
+		t.Fatalf("stream = %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// TestHostStreamRejectsOneFrameOverTheHardCap: the hard cap is the memory
+// safety net, so even one frame bigger than it is given up on rather than
+// queued whole.
+func TestHostStreamRejectsOneFrameOverTheHardCap(t *testing.T) {
+	oldBytes := hardQueuedBytes
+	hardQueuedBytes = 8
+	t.Cleanup(func() { hardQueuedBytes = oldBytes })
+
+	f := newFakeHost(t)
+	id, c := f.begin(true)
+	b := readBody(f, id, c, context.Background())
+	reply(t, f, id, c, func() {
+		f.chunk(id, strings.Repeat("x", 64))
+		f.answer(id, "")
+	})
+	waitFor(t, "the oversized frame was given up on", func() bool { return !f.registered(id) })
+	if _, err := io.ReadAll(b); !errors.Is(err, errTooMuchQueued) {
+		t.Fatalf("read = %v, want errTooMuchQueued", err)
 	}
 }
 
@@ -634,9 +674,9 @@ func errAnswer(why string) message {
 // get there — and an answered one not at all.
 func TestHostAbortIsQueuedOncePerCall(t *testing.T) {
 	t.Run("overflow then read and close", func(t *testing.T) {
-		oldEvents := maxQueuedEvents
-		maxQueuedEvents = 2
-		t.Cleanup(func() { maxQueuedEvents = oldEvents })
+		oldEvents := hardQueuedEvents
+		hardQueuedEvents = 2
+		t.Cleanup(func() { hardQueuedEvents = oldEvents })
 
 		f := newFakeHost(t)
 		id, c := f.begin(true)
@@ -648,7 +688,7 @@ func TestHostAbortIsQueuedOncePerCall(t *testing.T) {
 			f.answer(id, "")
 		})
 		waitFor(t, "the given-up call was dropped", func() bool { return !f.registered(id) })
-		if _, err := io.ReadAll(b); !errors.Is(err, errQueuedEvents) {
+		if _, err := io.ReadAll(b); !errors.Is(err, errTooMuchQueued) {
 			t.Fatalf("read = %v, want the chunks limit", err)
 		}
 		if err := b.Close(); err != nil {
@@ -713,3 +753,177 @@ type discardCloser struct{}
 
 func (discardCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (discardCloser) Close() error                { return nil }
+
+// TestHostStallWatchArmsAtTheWatermark: the watchdog is armed when the backlog
+// first passes the soft watermark, not when the call began or a chunk arrived
+// under it, and it is dropped once the reader drains the backlog under it.
+func TestHostStallWatchArmsAtTheWatermark(t *testing.T) {
+	oldBytes, oldIdle := softQueuedBytes, stallIdle
+	softQueuedBytes, stallIdle = 8, time.Hour // armed, but never fires here
+	t.Cleanup(func() { softQueuedBytes, stallIdle = oldBytes, oldIdle })
+
+	f := newFakeHost(t)
+	id, c := f.begin(true)
+	b := readBody(f, id, c, context.Background())
+	popped := make(chan struct{})
+	go func() {
+		f.head(id)
+		<-popped
+		f.chunk(id, "small") // under the watermark
+	}()
+	if h := f.next(t, c); h.Status != 200 {
+		t.Fatalf("head = %+v", h)
+	}
+	close(popped)
+	waitFor(t, "the chunk was queued", func() bool { return c.queued() == 1 })
+	if c.armed() {
+		t.Fatal("the watchdog was armed under the watermark")
+	}
+	// a first read of the small chunk, then a chunk past the watermark
+	if n, err := b.Read(make([]byte, 8)); n != 5 || err != nil {
+		t.Fatalf("read = %d, %v, want 5 bytes", n, err)
+	}
+	f.chunk(id, "over the watermark")
+	waitFor(t, "the watchdog was armed", func() bool { return c.armed() })
+	f.answer(id, "")
+
+	// draining the backlog under the watermark drops it
+	if _, err := io.ReadAll(b); err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+	if c.armed() {
+		t.Fatal("the watchdog stayed armed after the backlog drained")
+	}
+}
+
+// TestHostStallWatchSparesASlowReader: a reader that keeps taking data, even
+// slowly, is not given up on: a real read between two watchdog rounds pushes
+// the deadline out, and the whole reply arrives.
+func TestHostStallWatchSparesASlowReader(t *testing.T) {
+	oldBytes, oldIdle := softQueuedBytes, stallIdle
+	softQueuedBytes, stallIdle = 8, 100*time.Millisecond
+	t.Cleanup(func() { softQueuedBytes, stallIdle = oldBytes, oldIdle })
+
+	f := newFakeHost(t)
+	id, c := f.begin(true)
+	b := readBody(f, id, c, context.Background())
+	reply(t, f, id, c, func() {
+		for range 20 {
+			f.chunk(id, "0123456789")
+		}
+		f.answer(id, "")
+	})
+	// read slower than the watchdog's idle, in several real reads: each one
+	// stamps progress, so the call is never taken for stalled
+	var got strings.Builder
+	buf := make([]byte, 10)
+	for got.Len() < 200 {
+		n, err := b.Read(buf)
+		if err != nil {
+			t.Fatalf("slow read at %d bytes: %v", got.Len(), err)
+		}
+		got.Write(buf[:n])
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got.Len() != 200 {
+		t.Fatalf("read %d bytes, want 200", got.Len())
+	}
+	waitFor(t, "the answered call was forgotten", func() bool { return !f.registered(id) })
+	if c.givenUp() != nil {
+		t.Fatalf("a slow reader was given up on: %v", c.givenUp())
+	}
+}
+
+// TestHostStallWatchGivesUpAStoppedReader: a reader that stops with a backlog
+// past the watermark is given up on after the idle, without another chunk or
+// another read: the error reaches it and the child is told to stop.
+func TestHostStallWatchGivesUpAStoppedReader(t *testing.T) {
+	oldBytes, oldIdle := softQueuedBytes, stallIdle
+	softQueuedBytes, stallIdle = 8, 30*time.Millisecond
+	t.Cleanup(func() { softQueuedBytes, stallIdle = oldBytes, oldIdle })
+
+	f := newFakeHost(t)
+	id, c := f.begin(true)
+	b := readBody(f, id, c, context.Background())
+	reply(t, f, id, c, func() {
+		for range 20 {
+			f.chunk(id, "0123456789")
+		}
+		// the child is still streaming: no answer yet, so the call is the
+		// host's to give up when the reader stops
+	})
+	// nothing is read: the watchdog fires on its own
+	waitFor(t, "the stalled reader was given up on", func() bool { return !f.registered(id) })
+	if _, err := io.ReadAll(b); !errors.Is(err, errStalledReader) {
+		t.Fatalf("read = %v, want errStalledReader", err)
+	}
+	if got := f.abortsTaken(); len(got) != 1 || got[0] != id {
+		t.Fatalf("aborts = %v, want just %d", got, id)
+	}
+}
+
+// TestHostStallWatchEndsAFinishedCallsBody: a call the host already answered
+// and forgot — its final answer came, but a slow consumer left a big backlog —
+// still has its body ended by the watchdog, with no abort sent for a fetch the
+// child has already finished.
+func TestHostStallWatchEndsAFinishedCallsBody(t *testing.T) {
+	oldBytes, oldIdle := softQueuedBytes, stallIdle
+	softQueuedBytes, stallIdle = 8, 30*time.Millisecond
+	t.Cleanup(func() { softQueuedBytes, stallIdle = oldBytes, oldIdle })
+
+	f := newFakeHost(t)
+	id, c := f.begin(true)
+	b := readBody(f, id, c, context.Background())
+	// the final answer comes right after the backlog, so the host forgets the
+	// call while the consumer has read none of it
+	reply(t, f, id, c, func() {
+		for range 20 {
+			f.chunk(id, "0123456789")
+		}
+		f.answer(id, "")
+	})
+	waitFor(t, "the answered call was forgotten", func() bool { return !f.registered(id) })
+	// the watchdog is the only thing that can end this body now
+	waitFor(t, "the finished call's body ended", func() bool { return c.givenUp() != nil })
+	if err := c.givenUp(); !errors.Is(err, errStalledReader) {
+		t.Fatalf("givenUp = %v, want errStalledReader", err)
+	}
+	if _, err := io.ReadAll(b); !errors.Is(err, errStalledReader) {
+		t.Fatalf("read = %v, want errStalledReader", err)
+	}
+	if got := f.abortsTaken(); len(got) != 0 {
+		t.Fatalf("aborts = %v, want none for a finished fetch", got)
+	}
+}
+
+// TestHostStallWatchStoppedByClose: closing the body drops the watchdog, so a
+// callback left from a timer already running finds the call stopped and does
+// nothing.
+func TestHostStallWatchStoppedByClose(t *testing.T) {
+	oldBytes, oldIdle := softQueuedBytes, stallIdle
+	softQueuedBytes, stallIdle = 8, 30*time.Millisecond
+	t.Cleanup(func() { softQueuedBytes, stallIdle = oldBytes, oldIdle })
+
+	f := newFakeHost(t)
+	id, c := f.begin(true)
+	b := readBody(f, id, c, context.Background())
+	reply(t, f, id, c, func() {
+		for range 20 {
+			f.chunk(id, "0123456789")
+		}
+	})
+	waitFor(t, "the watchdog was armed", func() bool { return c.armed() })
+	if err := b.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if c.armed() {
+		t.Fatal("the watchdog stayed armed after close")
+	}
+	time.Sleep(60 * time.Millisecond) // let any stale callback run
+	if c.givenUp() != nil {
+		t.Fatalf("a closed call was given up on: %v", c.givenUp())
+	}
+	if got := f.abortsTaken(); len(got) != 1 || got[0] != id {
+		t.Fatalf("aborts = %v, want just the close's %d", got, id)
+	}
+}

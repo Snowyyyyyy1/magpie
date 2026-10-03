@@ -64,42 +64,69 @@ type call struct {
 	over    error         // why the call's backlog passed its limit
 	stopped bool          // the call is over for good: nothing more is queued
 	wake    chan struct{} // buffered 1: something was queued, or the call is over
+
+	// h and id are how the stall watchdog gives the call up: the child is
+	// told to stop its fetch only while the call is still the host's.
+	h  *host
+	id int64
+
+	// watch is the stall watchdog: it is armed when the backlog first
+	// passes the soft watermark, and gives the call up only after stallIdle
+	// without the reader taking anything. lastRead is the last read that
+	// returned data (the zero time for none yet); before the first read the
+	// grace runs from armAt, so a plugin thinking for a long while before
+	// its reply begins is not taken for a stalled reader. watchGen makes a
+	// callback from a timer that was stopped or re-armed a no-op.
+	watch    *time.Timer
+	watchGen int64
+	armAt    time.Time
+	lastRead time.Time
 }
 
-// A fetch's backlog is bounded by the data queued and by the chunks queued:
-// a consumer that stops reading must not let one request pile up without
-// limit, nor make the host's reader wait for it. Past either limit that
-// request alone is given up on, with which limit as why. One chunk is
-// always taken however big it is (a reply the plugin sends whole), so the
-// bound is the backlog queued, not one message: at most maxQueuedBytes of
-// chunks plus that one. Tests lower them.
+// A fetch's backlog is watched, not cut, at the soft watermark: past it the
+// call's reader has stallIdle to take something, and only a reader that took
+// nothing for that long is given up on. A reply larger than the watermark
+// that is read, however slowly, still arrives whole; a consumer that stopped
+// is let go of. The hard caps are the memory safety net: past either, however
+// fast the reader, the call is given up on, one reply the plugin sends whole
+// included. The byte caps bound the queued chunks (base64), not the process,
+// and one frame already decoded is held besides. Tests lower them.
 var (
-	maxQueuedBytes  = 4 << 20
-	maxQueuedEvents = 4096
-	errQueuedBytes  = errors.New("the plugin kept sending a reply whose reader stopped reading (too many bytes queued); that request was given up on")
-	errQueuedEvents = errors.New("the plugin kept sending a reply whose reader stopped reading (too many chunks queued); that request was given up on")
+	softQueuedBytes  = 4 << 20
+	softQueuedEvents = 4096
+	hardQueuedBytes  = 64 << 20
+	hardQueuedEvents = 65536
+	stallIdle        = 10 * time.Second
+	errStalledReader = errors.New("the plugin kept sending a reply whose reader stopped reading (nothing was read for a while); that request was given up on")
+	errTooMuchQueued = errors.New("the plugin sent more of a reply than the host queues (too much queued); that request was given up on")
 )
 
 // push queues m for the call's reader, without waiting for it. It is false
-// when the call's backlog passed its limit and m was not taken: the call is
-// given up on, and its reader is told why rather than a chunk going missing
-// unnoticed.
+// when the call's backlog passed its hard limit and m was not taken: the call
+// is given up on, and its reader is told why rather than a chunk going
+// missing unnoticed.
 func (c *call) push(m message) bool {
 	c.mu.Lock()
 	taken := false
 	switch {
 	case c.stopped || c.over != nil:
 		// a call given up on takes nothing more
-	case c.bytes > maxQueuedBytes:
-		c.over = errQueuedBytes
-	case len(c.queue) >= maxQueuedEvents:
-		c.over = errQueuedEvents
 	default:
-		// the backlog queued already, not the chunk in hand: one reply the
-		// plugin sends whole is taken however big it is
-		c.queue = append(c.queue, m)
-		c.bytes += len(m.Data)
-		taken = true
+		// the backlog the queue would hold with this chunk in it, not the
+		// chunk alone: the memory safety net counts the whole reply
+		nbytes, nevents := c.bytes+len(m.Data), len(c.queue)+1
+		if nbytes > hardQueuedBytes || nevents > hardQueuedEvents {
+			c.over = errTooMuchQueued
+			// the resource cap is terminal: the encoding is dropped now, not
+			// held for a reader that may never come
+			c.queue, c.bytes = nil, 0
+			c.stopWatchLocked()
+		} else {
+			c.queue = append(c.queue, m)
+			c.bytes = nbytes
+			taken = true
+			c.armWatchLocked()
+		}
 	}
 	c.mu.Unlock()
 	c.notify()
@@ -114,9 +141,97 @@ func (c *call) pop() (message, bool) {
 		return message{}, false
 	}
 	m := c.queue[0]
+	c.queue[0] = message{} // let the chunk's data go with the chunk
 	c.queue = c.queue[1:]
+	if len(c.queue) == 0 {
+		c.queue = nil
+	}
 	c.bytes -= len(m.Data)
+	if !c.overSoftLocked() {
+		// the backlog is back under the watermark: nothing left to watch
+		c.stopWatchLocked()
+	}
 	return m, true
+}
+
+// overSoftLocked is whether the backlog passed the soft watermark.
+func (c *call) overSoftLocked() bool {
+	return c.bytes > softQueuedBytes || len(c.queue) > softQueuedEvents
+}
+
+// armWatchLocked starts the stall watchdog when the backlog first passes the
+// soft watermark; from then on the call's reader has stallIdle to take
+// something. The callback carries the generation, so one left from a timer
+// the call has since drained, closed or given up on does nothing.
+func (c *call) armWatchLocked() {
+	if c.watch != nil || c.stopped || c.over != nil || !c.overSoftLocked() {
+		return
+	}
+	c.watchGen++
+	gen := c.watchGen
+	c.armAt = time.Now()
+	c.watch = time.AfterFunc(stallIdle, func() { c.onStall(gen) })
+}
+
+// stopWatchLocked drops the stall watchdog: the call was drained, closed,
+// cancelled or given up on, so there is nothing left to watch. Bumping the
+// generation makes a callback already under way a no-op.
+func (c *call) stopWatchLocked() {
+	if c.watch != nil {
+		c.watch.Stop()
+		c.watch = nil
+	}
+	c.watchGen++
+	c.armAt = time.Time{}
+}
+
+// noteRead is the reader saying it took data: real progress, unlike a chunk
+// arriving or a read that asked for nothing. It only stamps the time under
+// the call's own mutex; the watchdog reads it when it fires, so a read
+// allocates no timer.
+func (c *call) noteRead() {
+	c.mu.Lock()
+	c.lastRead = time.Now()
+	c.mu.Unlock()
+}
+
+// onStall is the stall watchdog firing: the backlog passed the soft watermark
+// and the reader took nothing for stallIdle, so the call is given up on. What
+// it queued is dropped and its reader is told why; the child is told to stop
+// only while the call is still the host's to give up (an answered call the
+// host has already forgotten is left alone). gen is the generation this
+// callback was armed with.
+func (c *call) onStall(gen int64) {
+	c.mu.Lock()
+	if c.watchGen != gen || c.stopped || c.over != nil || !c.overSoftLocked() {
+		c.mu.Unlock()
+		return
+	}
+	ref := c.armAt
+	if c.lastRead.After(ref) {
+		ref = c.lastRead
+	}
+	if wait := stallIdle - time.Since(ref); wait > 0 {
+		// the reader took something since the grace began: wait the rest
+		c.watchGen++
+		gen = c.watchGen
+		c.watch = time.AfterFunc(wait, func() { c.onStall(gen) })
+		c.mu.Unlock()
+		return
+	}
+	// nothing was read for stallIdle: the call is given up on. Its own body
+	// ends here, whether or not the host still holds the call.
+	c.stopWatchLocked()
+	c.over = errStalledReader
+	c.queue, c.bytes = nil, 0
+	c.mu.Unlock()
+	c.notify()
+	// Whether this call is still the host's is what tells the child to stop:
+	// forget takes h.mu, so it is taken after c.mu is let go, and an answered
+	// call the host already forgot is left alone.
+	if c.h.forget(c.id) {
+		c.h.abort(c.id)
+	}
 }
 
 // givenUp is why the call's backlog passed its limit, nil for one it didn't.
@@ -127,11 +242,13 @@ func (c *call) givenUp() error {
 }
 
 // release ends the call for good: nothing more is queued for it, and what it
-// held is dropped, so a body given up on holds nothing.
+// held is dropped, so a body given up on holds nothing. The stall watchdog
+// goes with it.
 func (c *call) release() {
 	c.mu.Lock()
 	c.stopped = true
 	c.queue, c.bytes = nil, 0
+	c.stopWatchLocked()
 	c.mu.Unlock()
 }
 
@@ -584,6 +701,7 @@ func (h *host) begin(stream bool) (int64, *call) {
 	h.mu.Lock()
 	h.next++
 	id := h.next
+	c.h, c.id = h, id
 	h.calls[id] = c
 	h.mu.Unlock()
 	return id, c
@@ -789,7 +907,10 @@ func (c *call) headRead(ctx context.Context) (head message, answer *message, err
 
 // body is a fetch's reply body. Its reader takes the chunks the call queued,
 // in the order they came; whoever reads it does the waiting, so nothing of
-// magpie's is parked while a consumer that stopped reading holds one.
+// magpie's is parked while a consumer that stopped reading holds one. A
+// cancelled ctx is noticed in Read and Close; a consumer that neither reads
+// nor closes is not waited on, and the stall watchdog gives it up when its
+// backlog passes the watermark.
 type body struct {
 	h      *host
 	id     int64
@@ -820,6 +941,11 @@ func (b *body) Read(p []byte) (int, error) {
 		if len(b.buf) > 0 {
 			n := copy(p, b.buf)
 			b.buf = b.buf[n:]
+			if n > 0 {
+				// real progress: the reader is taking the reply, so the
+				// stall watchdog's grace starts over
+				b.c.noteRead()
+			}
 			return n, nil
 		}
 		if m, ok := b.c.pop(); ok {

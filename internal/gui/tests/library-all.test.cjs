@@ -34,8 +34,8 @@ const base = () => ({
   skills: [{ name: "pdf", kind: "folder", description: "d", source: `${HOME}/skills/pdf`, agents: ["codex"] }],
 });
 
-function server(lang, posts, fail) {
-  let lib = base();
+function server(lang, posts, fail, fixture = base()) {
+  let lib = fixture;
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
@@ -81,19 +81,19 @@ const words = {
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   test(engine + ": a server's or skill's All chip", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
-    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
     const errors = [];
     t.after(async () => {
       if (errors.length) console.log(errors);
       await browser.close();
     });
-    const open = async (lang, tab, posts, fail) => {
-      const ctx = await browser.newContext({ viewport: { width: 980, height: 800 } }); // the MCP tab fits, its "In projects" too
+    const open = async (lang, tab, posts, fail, { width = 980, fixture } = {}) => {
+      const ctx = await browser.newContext({ viewport: { width, height: 800 } }); // the MCP tab fits, its "In projects" too
       await ctx.addInitScript((tab) => { try { localStorage.setItem("magpie.libTab", tab); } catch {} }, tab);
       const page = await ctx.newPage();
       page.setDefaultTimeout(5000);
       page.on("pageerror", (e) => errors.push(e.message));
-      await page.route("http://magpie.test/**", server(lang, posts, fail));
+      await page.route("http://magpie.test/**", server(lang, posts, fail, fixture));
       await page.goto("http://magpie.test/");
       await page.locator('button[data-view="library"]').click();
       await page.locator("#view-library .lib-row").first().waitFor();
@@ -112,6 +112,41 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const lit = (r) => r.locator(".lib-ag[data-agent]").evaluateAll((cs) => cs.filter((c) => c.getAttribute("aria-pressed") === "true").map((c) => c.dataset.agent));
 
     for (const lang of ["en", "zh"]) {
+      for (const width of [560, 980]) {
+        await t.test(`${lang}: All stays under a stationary pointer with 14 agents at ${width}px`, async () => {
+          const fixture = base(), posts = [];
+          fixture.agents = Array.from({ length: 14 }, (_, i) => agent("a" + i, "Agent " + i, "codex-color"));
+          fixture.servers = [{ name: "files", transport: "stdio", command: "codex", args: ["mcp-server"], agents: [] }];
+          const page = await open(lang, "mcp", posts, null, { width, fixture });
+          await page.mouse.move(0, 0);
+          const r = row(page, "files"), all = r.locator(".lib-ag.all");
+          await r.evaluate(async (r) => {
+            await Promise.all(r.parentElement.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})));
+          });
+          const before = await all.boundingBox();
+          const point = { x: before.x + before.width / 2, y: before.y + before.height / 2 };
+          await page.mouse.move(point.x, point.y);
+          const samples = await all.evaluate(async (c, point) => {
+            const samples = [];
+            for (let i = 0; i < 60; i++) {
+              await new Promise(requestAnimationFrame);
+              const a = c.getBoundingClientRect(), row = c.closest(".lib-row").getBoundingClientRect();
+              samples.push({ x: a.x, y: a.y, height: row.height, hit: document.elementFromPoint(point.x, point.y)?.closest("button") === c });
+            }
+            return samples;
+          }, point);
+          assert.ok(samples.every((s) => s.hit), "All moved out from under the stationary pointer");
+          assert.ok(samples.every((s) => Math.abs(s.x - before.x) <= 1 && Math.abs(s.y - before.y) <= 1), "All moved as the chips spread: " + JSON.stringify({ before, samples: samples.filter((s) => Math.abs(s.x - before.x) > 1 || Math.abs(s.y - before.y) > 1).slice(0, 3) }));
+          assert.ok(Math.max(...samples.map((s) => s.height)) - Math.min(...samples.map((s) => s.height)) <= 1, "the row kept wrapping and unwrapping");
+          assert.equal(posts.length, 0, "hover must not change agent assignments");
+          await page.mouse.click(point.x, point.y);
+          await page.waitForFunction(() => document.querySelector(".lib-ag.all").getAttribute("aria-pressed") === "true");
+          assert.equal(posts.length, 1);
+          assert.equal(posts[0].agents.length, 14);
+          await page.close();
+        });
+      }
+
       await t.test(lang + ": All gives a server to every agent that can take it, and takes it from all", async () => {
         const posts = [];
         const page = await open(lang, "mcp", posts);

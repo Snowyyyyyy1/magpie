@@ -222,6 +222,7 @@
   function agentChips(all, on, onChange, opts = {}) {
     on ||= [];
     const box = el("div", "lib-agents");
+    box.style.setProperty("--lib-agent-count", all.length);
     for (const a of all) {
       const always = opts.always?.(a) || "";
       const has = on.includes(a.id) || !!always;

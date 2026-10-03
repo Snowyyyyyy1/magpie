@@ -196,6 +196,11 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 /* in a list row they sit stacked like a hand of cards, on one line, and fan
    out when the pointer or focus comes to them */
 .lib-row > .lib-agents { flex-wrap: nowrap; gap: 0; max-width: none; padding-left: 4px; }
+/* Reserve the spread width between All and the icons. As the gaps grow,
+   this spacer shrinks by the same amount, keeping All and the row in place. */
+.lib-row > .lib-agents::before { content: ""; order: 1; flex: none; width: max(0px, calc((var(--lib-agent-count, 1) - 1) * 10px)); transition: width .22s var(--ease); }
+.lib-row > .lib-agents:hover::before, .lib-row > .lib-agents:focus-within::before { width: 0; }
+.lib-row > .lib-agents .lib-ag[data-agent] { order: 2; }
 .lib-row > .lib-agents .lib-ag { flex: none; width: 24px; min-width: 0; height: 24px; padding: 0 0 0 4px; justify-content: flex-start; background: var(--card); border-color: var(--line-2); box-shadow: none; transition: margin .22s var(--ease), background .14s, border-color .14s, transform .14s var(--ease); }
 .lib-row > .lib-agents .lib-ag .ic { width: 14px; height: 14px; }
 /* the ring in the card's colour that cuts each chip out of the one under
@@ -205,7 +210,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-row > .lib-agents .lib-ag + .lib-ag { margin-left: -7px; }
 .lib-row > .lib-agents .lib-ag.on { border-color: var(--line); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
 .lib-row > .lib-agents .lib-ag.via { border-style: dashed; }
-.lib-row > .lib-agents:hover .lib-ag + .lib-ag, .lib-row > .lib-agents:focus-within .lib-ag + .lib-ag { margin-left: 3px; }
+.lib-row > .lib-agents:hover .lib-ag[data-agent] + .lib-ag[data-agent], .lib-row > .lib-agents:focus-within .lib-ag[data-agent] + .lib-ag[data-agent] { margin-left: 3px; }
 .lib-row > .lib-agents:hover .lib-ag, .lib-row > .lib-agents:focus-within .lib-ag { box-shadow: none; }
 .lib-row > .lib-agents:hover .lib-ag:not(:focus-visible), .lib-row > .lib-agents:focus-within .lib-ag:not(:focus-visible) { outline-color: transparent; }
 .lib-row > .lib-agents .lib-ag:hover { background: var(--pill); z-index: 1; }

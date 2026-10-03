@@ -954,7 +954,10 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 	if m.ImageInput != nil {
 		images = *m.ImageInput
 	}
-	images, imageInput := ApplyImage(p.ID, m.ID, images, m.ImageInput)
+	imageInput := m.ImageInput
+	if override, ok := s.ModelImages[p.ID+"/"+m.ID]; ok {
+		images, imageInput = override, &override
+	}
 	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: m.Name, Efforts: effortsOf(m), Provider: p,
 		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas}
 	if n, ok := modelNameIn(s.ModelNames, p.ID, m.ID); ok {

@@ -59,9 +59,20 @@ type verdict struct {
 
 var classified = struct {
 	sync.Mutex
-	m      map[string]classifiedAs
-	failed map[string]classifyFailure // classifier model → its last failure
-}{m: map[string]classifiedAs{}, failed: map[string]classifyFailure{}}
+	m        map[string]classifiedAs
+	failed   map[string]classifyFailure // classifier model → its last failure
+	inflight map[string]*classifyCall
+}{
+	m:        map[string]classifiedAs{},
+	failed:   map[string]classifyFailure{},
+	inflight: map[string]*classifyCall{},
+}
+
+type classifyCall struct {
+	done chan struct{}
+	v    verdict
+	err  error
+}
 
 type classifiedAs struct {
 	v  verdict
@@ -80,7 +91,8 @@ type answerError struct{ error }
 // classify is ask's answer for the message, from what was asked before
 // when it can be: the same message and intents within classifyKeep. A
 // classifier that failed is left to rest for classifyRest rather than
-// making every turn wait out its timeout.
+// making every turn wait out its timeout. Concurrent calls asking the
+// same question share the answer in flight.
 func classify(ask classifier, model string, intents []string, prev before, effort bool, text string) (v verdict, cached bool, err error) {
 	h := sha256.New()
 	h.Write([]byte(model + "\x00" + strings.ToLower(strings.Join(intents, "\x00")) + "\x00" + prev.Intent + "\x00" + prev.Effort + "\x00" + strconv.FormatBool(effort) + "\x00" + text))
@@ -91,20 +103,36 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 		classified.Unlock()
 		return c.v, true, nil
 	}
+	if c, ok := classified.inflight[key]; ok {
+		classified.Unlock()
+		<-c.done
+		return c.v, c.err == nil, c.err
+	}
 	if f, ok := classified.failed[model]; ok && now.Sub(f.at) < classifyRest {
 		classified.Unlock()
 		return verdict{}, false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(f.at).Round(time.Second), f.err)
 	}
+	c := &classifyCall{done: make(chan struct{}), err: errors.New("classifier did not finish")}
+	classified.inflight[key] = c
 	classified.Unlock()
+	// Release waiters even if ask panics; its caller still sees the panic.
+	defer func() {
+		classified.Lock()
+		delete(classified.inflight, key)
+		close(c.done)
+		classified.Unlock()
+	}()
 	v, err = ask(model, intents, prev, effort, text)
 	classified.Lock()
 	defer classified.Unlock()
+	c.err = err
 	if err != nil {
 		if !errors.As(err, new(answerError)) {
 			classified.failed[model] = classifyFailure{err: err.Error(), at: time.Now()}
 		}
 		return verdict{}, false, err
 	}
+	c.v = v
 	delete(classified.failed, model)
 	classified.m[key] = classifiedAs{v: v, at: time.Now()}
 	if len(classified.m) > 4096 {

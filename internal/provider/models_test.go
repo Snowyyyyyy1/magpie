@@ -10,7 +10,35 @@ import (
 
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/settings"
 )
+
+func TestEntryForUsesImageSettingsSnapshot(t *testing.T) {
+	prefsHome(t)
+	if err := settings.Save(settings.Settings{ModelImages: map[string]bool{"a/sol": true}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := settings.Settings{ModelImages: map[string]bool{"a/sol": false, "b/sol": true, "c/*": true}}
+	yes, no := true, false
+	for _, tc := range []struct {
+		provider string
+		known    *bool
+		images   bool
+		want     *bool
+	}{
+		{"a", &yes, false, &no},
+		{"b", nil, true, &yes},
+		{"c", nil, false, nil},
+		{"d", &yes, true, &yes},
+		{"e", &no, false, &no},
+	} {
+		e := entryFor(Provider{ID: tc.provider}, catalog.Model{ID: "sol", ImageInput: tc.known}, snapshot)
+		if e.Images != tc.images || (e.ImageInput == nil) != (tc.want == nil) ||
+			(e.ImageInput != nil && *e.ImageInput != *tc.want) {
+			t.Fatalf("%s image snapshot = %v, %v; want %v, %v", tc.provider, e.Images, e.ImageInput, tc.images, tc.want)
+		}
+	}
+}
 
 func TestExplicitTextOnlyBeatsCrossProviderImageGuess(t *testing.T) {
 	home := t.TempDir()

@@ -672,7 +672,8 @@ func (h *host) send(v any) error {
 
 // abort tells the child to stop a fetch, without waiting for it: the child's
 // stdin can be full when it stopped reading it, so the id is queued for
-// abortLoop instead. A dropped id's fetch ends on its own.
+// abortLoop instead. Aborts are best-effort: a full queue drops the id, so
+// its upstream fetch may keep running, including an endless stream.
 func (h *host) abort(id int64) {
 	select {
 	case h.aborts <- id:

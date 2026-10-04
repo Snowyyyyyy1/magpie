@@ -43,9 +43,23 @@ jobs:
       - name: Vet
         run: go vet -tags "${{ steps.tags.outputs.tags }}" ./...
 
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os == 'Linux'
+        with:
+          bun-version: 1.4.2
+
       - name: Test
         if: runner.os != 'Windows'
         run: go test -tags "${{ steps.tags.outputs.tags }}" ./...
+
+      - name: Production plugin flow
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        env:
+          MAGPIE_FLOW_BIG: '1'
+        run: |
+          bun --version
+          go test -timeout 10m -tags "${{ steps.tags.outputs.tags }}" ./internal/plugin/... -run '^TestFlowBigReplyProd$' -count=1
 
       # The redaction tests reuse this binary in fresh processes to check
       # first-use races, so it must include the race detector.

@@ -4,7 +4,12 @@
 // magpie → host: {id, method, params}; the host answers {id, result} or
 // {id, error}. A fetch streams its reply first: {id, event: "head", status,
 // headers}, then {id, event: "chunk", data} (base64) as the body comes, then
-// {id, result: null}. {method: "abort", params: {id}} cancels one.
+// {id, result: null}. {method: "abort", params: {id}} cancels one, and
+// {method: "credit", params: {id, n}} gives a fetch back the n charged bytes
+// its reader took (the payload it read, and a frame's overhead once the frame
+// is done), so it may send that much more. A fetch starts with the window
+// magpie gave it and sends no more than that ahead of its reader, so a slow
+// reader pauses its upstream instead of the host buffering without bound.
 // host → magpie, unasked: {event: "log", level, message} and {event:
 // "toast", ...} (what a plugin logs or shows), {event: "auth", provider}
 // (a sign-in the host saved or refreshed).
@@ -29,7 +34,177 @@ import tls from "node:tls"
 import { pathToFileURL } from "node:url"
 
 const rpcWrite = process.stdout.write.bind(process.stdout)
-const send = (msg) => rpcWrite(JSON.stringify(msg) + "\n")
+
+// Everything the child writes goes through one ordered queue: a line goes out
+// only when the stream can take it, so a parent that stops reading bounds what
+// Bun buffers instead of it growing without bound. A caller may cancel its own
+// wait, which drops its line if it has not been written yet, so an aborted
+// request leaves no listener or closure behind. A write failure or a closed
+// stream fails every line still waiting rather than leaving them pending.
+const outq = [] // {line, settle}
+let pumping = false
+let outFail = null
+
+function waitDrain() {
+  return new Promise((resolve, reject) => {
+    const done = () => { clear(); resolve() }
+    const bad = (e) => { clear(); reject(e ?? new Error("the host's stdout closed")) }
+    const clear = () => {
+      process.stdout.removeListener("drain", done)
+      process.stdout.removeListener("error", bad)
+      process.stdout.removeListener("close", bad)
+    }
+    process.stdout.once("drain", done)
+    process.stdout.once("error", bad)
+    process.stdout.once("close", bad)
+  })
+}
+
+function pump() {
+  if (pumping) return
+  pumping = true
+  while (outq.length) {
+    const item = outq[0]
+    if (outFail) {
+      outq.shift()
+      item.settle(outFail)
+      continue
+    }
+    // write returns false when the stream is full, but the line was still
+    // taken: wait for it to drain before the next one, never write it twice
+    const ok = rpcWrite(item.line)
+    outq.shift()
+    item.settle(null)
+    if (!ok) {
+      waitDrain().then(
+        () => { pumping = false; pump() },
+        (e) => { outFail = e; pumping = false; pump() },
+      )
+      return
+    }
+  }
+  pumping = false
+}
+
+// queueLine queues one line, giving a promise that settles with null once it is
+// written or with the error that stopped it, and a way to give the wait up.
+function queueLine(line) {
+  const item = { line, settle: () => {} }
+  const promise = new Promise((resolve) => { item.settle = (err) => resolve(err ?? null) })
+  outq.push(item)
+  pump()
+  return {
+    promise,
+    cancel: () => {
+      const i = outq.indexOf(item)
+      if (i >= 0) {
+        outq.splice(i, 1)
+        item.settle(null)
+      }
+    },
+  }
+}
+
+// send queues one message, ignoring whether it was written.
+const send = (msg) => queueLine(JSON.stringify(msg) + "\n").promise
+
+// sendCancelable is send, with a way to give the wait up.
+const sendCancelable = (msg) => queueLine(JSON.stringify(msg) + "\n")
+
+// A host cancellation suppresses the answer; a local abort still owes Go
+// its error. The record, rather than the signal, owns pending wire output.
+function transitionFetch(record, state) {
+  if (record.state === "finished") return
+  if (record.state !== "cancelled") record.state = state
+  if (state === "streaming") return
+  record.gate.stop()
+  const body = record.unconsumedBody
+  record.unconsumedBody = undefined
+  try { Promise.resolve(body?.cancel?.()).catch(() => {}) } catch {}
+  if (state === "finishing") return
+  record.pendingSend?.cancel()
+  record.readyCleanup?.()
+  record.readyCleanup = null
+  if (state === "cancelled") record.controller.abort()
+  else record.state = "finished"
+}
+
+function checkFetch(record) {
+  if (record.state === "cancelled" || record.state === "finished") throw new DOMException("Aborted", "AbortError")
+  record.controller.signal.throwIfAborted()
+}
+
+async function sendForFetch(record, msg) {
+  if (record.state === "cancelled" || record.state === "finished") return
+  const ctl = record.controller
+  const pendingSend = sendCancelable(msg)
+  record.pendingSend = pendingSend
+  const onAbort = () => pendingSend.cancel()
+  ctl.signal.addEventListener("abort", onAbort, { once: true })
+  try {
+    const err = await pendingSend.promise
+    if (err) throw err
+  } finally {
+    record.pendingSend = null
+    ctl.signal.removeEventListener("abort", onAbort)
+  }
+}
+
+// The largest decoded bytes one frame carries: the reader credits in larger
+// steps than this, so frames stay small enough that a credit round trip is
+// cheap without one frame dwarfing the window.
+const MAX_FRAME = 64 << 10
+
+// FRAME_OVERHEAD is what one queued frame costs the window besides its bytes,
+// as Go counts it too: the message struct and the decoded slice behind it. It
+// keeps a producer of tiny frames from filling a window with structs.
+const FRAME_OVERHEAD = 2048
+
+// HEAD_MAX and HEAD_ENTRIES are magpie's own head-envelope policy, not HTTP's:
+// a fetch's head carries at most HEAD_MAX header bytes (the UTF-8 bytes of
+// every name and value, plus HEAD_ENTRY_COST an entry) and HEAD_ENTRIES
+// entries, counted the same by Go before it is queued, so a vendor's unbounded
+// header set is not a free 0-charge line.
+const HEAD_MAX = 64 << 10
+const HEAD_ENTRIES = 256
+const HEAD_ENTRY_COST = 4
+
+// headCost is a head's header cost, as Go counts it too: the UTF-8 bytes of
+// every name and value, plus HEAD_ENTRY_COST an entry.
+function headCost(h) {
+  let n = 0
+  for (const [k, v] of Object.entries(h)) n += Buffer.byteLength(k) + Buffer.byteLength(v) + HEAD_ENTRY_COST
+  const entries = Object.keys(h).length
+  return { n, entries }
+}
+
+// makeGate is one fetch's credit: the child may have `window` decoded bytes
+// outstanding, each frame costing its bytes plus FRAME_OVERHEAD. take returns
+// how many bytes of a frame may go now (-1 when the fetch was stopped), spend
+// takes the frame's cost, add is the reader giving credit back.
+function makeGate(window) {
+  let free = window
+  let stopped = false
+  let wake = null
+  const fit = (want) => Math.min(want, free - FRAME_OVERHEAD)
+  return {
+    take(want) {
+      if (stopped) return Promise.resolve(-1)
+      const n = fit(want)
+      if (n > 0) return Promise.resolve(n)
+      return new Promise((resolve) => { wake = (ok) => resolve(ok ? fit(want) : -1) })
+    },
+    spend(cost) { free -= cost },
+    add(n) {
+        free += n
+      if (wake && free > FRAME_OVERHEAD) { const w = wake; wake = null; w(true) }
+    },
+    stop() {
+      stopped = true
+      if (wake) { const w = wake; wake = null; w(false) }
+    },
+  }
+}
 
 // A plugin writing to stdout would break the protocol: everything it
 // prints goes to stderr, which magpie logs.
@@ -72,7 +247,7 @@ const hooks = [] // {spec, hooks}
 const loaded = [] // {spec, id, error}
 const loaders = new Map() // account → options the auth loader returned
 const sessions = new Map() // oauth sign-in in progress → its authorize result
-const inflight = new Map() // fetch id → AbortController
+const inflight = new Map() // fetch id → its lifecycle and owned resources
 const renewing = new Map() // account → its sign-in's renewal under way
 const unrenewed = new Map() // account → its last renewal that failed: {at, secret, gone}
 let config = { provider: {} } // what the plugins' config hooks made of it
@@ -1205,22 +1380,24 @@ function bodyOf(b64) {
   }
 }
 
-async function doFetch(id, params) {
+async function doFetch(id, record, params) {
   const key = accountKey(params.provider, params.account)
-  return via.run(params.proxy ?? "", () => inScope(params.provider, key, () => fetchAs(id, key, params)))
+  return via.run(params.proxy ?? "", () => inScope(params.provider, key, () => fetchAs(id, record, key, params)))
 }
 
-async function fetchAs(id, key, { provider, model, npm, url, method, headers, body, session }) {
-  const ctl = new AbortController()
-  inflight.set(id, ctl)
+async function fetchAs(id, record, key, params) {
+  const { controller: ctl, gate } = record
+  const { provider, model, npm, url, method, headers, body, session } = params
   try {
     const o = await options(provider, key)
+    checkFetch(record)
     const h = new Headers()
     for (const [k, v] of Object.entries(sdkHeaders(npm, o.apiKey))) h.set(k, v)
     for (const [k, v] of Object.entries(o.headers ?? {})) h.set(k, String(v))
     for (const [k, v] of Object.entries(headers ?? {})) h.set(k, v)
     // chat.headers: what the plugins add to the request, theirs winning
     const p = await info(provider, key)
+    checkFetch(record)
     const m = p.models[model] ?? { id: model, providerID: provider, api: { id: model, npm } }
     for (const x of hooks) {
       const fn = x.hooks["chat.headers"]
@@ -1240,31 +1417,64 @@ async function fetchAs(id, key, { provider, model, npm, url, method, headers, bo
       } catch (e) {
         send({ event: "log", level: "error", message: `${x.spec}: chat.headers: ${e?.message ?? e}` })
       }
+      checkFetch(record)
       for (const [k, v] of Object.entries(out.headers)) h.set(k, String(v))
     }
     const f = typeof o.fetch === "function" ? o.fetch : fetch
+    // the fetch is owned since its message was read: an abort that came while
+    // this setup was awaiting must not let the upstream start
+    checkFetch(record)
     const res = await f(url, {
       method: method ?? "POST",
       headers: h,
       body: bodyOf(body),
       signal: ctl.signal,
     })
+    record.unconsumedBody = res.body
+    checkFetch(record)
+    transitionFetch(record, "streaming")
     const rh = {}
     res.headers.forEach((v, k) => (rh[k] = v))
-    send({ id, event: "head", status: res.status, headers: rh })
+    const head = headCost(rh)
+    if (head.entries > HEAD_ENTRIES || head.n > HEAD_MAX) {
+      // the reply's head is past magpie's envelope: give the fetch up rather
+      // than write a line the host would refuse, and let the body go
+      throw new Error(`the reply's headers are past the host's head envelope (${HEAD_MAX} bytes or ${HEAD_ENTRIES} entries)`)
+    }
+    await sendForFetch(record, { id, event: "head", status: res.status, headers: rh })
+    checkFetch(record)
     if (res.body) {
+      record.unconsumedBody = undefined
+      // an abort gives up this fetch's own pending write, so its wait ends and
+      // the loop leaves rather than parking on a stream that never drains
       for await (const chunk of res.body) {
-        send({ id, event: "chunk", data: Buffer.from(chunk).toString("base64") })
+        checkFetch(record)
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        for (let off = 0; off < bytes.length; ) {
+          // one frame at a time, no more than the reader has credited: a
+          // reader that stopped leaves the upstream paused here
+          const n = await gate.take(Math.min(MAX_FRAME, bytes.length - off))
+          checkFetch(record)
+          if (n <= 0) break
+          const data = bytes.subarray(off, off + n).toString("base64")
+          gate.spend(n + FRAME_OVERHEAD)
+          await sendForFetch(record, { id, event: "chunk", data })
+          checkFetch(record)
+          off += n
+        }
       }
     }
-    send({ id, result: null })
+    checkFetch(record)
+    transitionFetch(record, "finishing")
+    await sendForFetch(record, { id, result: null })
   } catch (e) {
+    transitionFetch(record, "finishing")
     // a fetch hook that threw on its sign-in (a refresh the vendor turned
     // away) marks the account, as a built-in's refused refresh marked it
     if (["expired", "kept", "renewed"].includes(e?.signIn) && key) send({ event: "signIn", provider, account: key, said: e.signIn })
-    send({ id, error: { message: String(e?.message ?? e) } })
-  } finally {
-    inflight.delete(id)
+    // a fetch the host already gave up on needs no late error: its slot is
+    // gone, and queueing an uncancellable line for it would only be noise
+    await sendForFetch(record, { id, error: { message: String(e?.message ?? e) } })
   }
 }
 
@@ -1351,6 +1561,42 @@ const handlers = {
 // Everything waits for init; a request is answered even when magpie has
 // closed stdin behind it, the host leaving once nothing is pending.
 let ready
+let readyState
+const readyWaiters = new Set()
+function setReady(promise) {
+  readyState = undefined
+  ready = promise
+  const settle = (state) => {
+    readyState = state
+    for (const waiter of readyWaiters) waiter(state)
+    readyWaiters.clear()
+  }
+  ready.then(
+    () => settle({}),
+    (error) => settle({ error }),
+  )
+}
+function waitForReady(record) {
+  const signal = record.controller.signal
+  if (!ready) return Promise.reject(new Error("the host has not been initialised"))
+  return new Promise((resolve, reject) => {
+    const finish = (state) => {
+      readyWaiters.delete(finish)
+      signal.removeEventListener("abort", abort)
+      record.readyCleanup = null
+      if ("error" in state) reject(state.error)
+      else resolve()
+    }
+    const abort = () => finish({ error: new DOMException("Aborted", "AbortError") })
+    record.readyCleanup = abort
+    if (signal.aborted) abort()
+    else if (readyState) finish(readyState)
+    else {
+      readyWaiters.add(finish)
+      signal.addEventListener("abort", abort, { once: true })
+    }
+  })
+}
 let pending = 0
 let closed = false
 const done = () => {
@@ -1367,23 +1613,57 @@ rl.on("line", (line) => {
     return
   }
   if (msg.method === "abort") {
-    inflight.get(msg.params?.id)?.abort()
+    const id = msg.params?.id
+    const record = inflight.get(id)
+    if (record) transitionFetch(record, "cancelled")
+    return
+  }
+  if (msg.method === "credit") {
+    const record = inflight.get(msg.params?.id)
+    if (record?.state === "streaming") record.gate.add(msg.params?.n ?? 0)
     return
   }
   pending++
   if (msg.method === "init") {
-    ready = handlers.init(msg.params ?? {})
+    setReady(handlers.init(msg.params ?? {}))
     ready.then(
       (result) => send({ id: msg.id, result }),
       (e) => send({ id: msg.id, error: { message: String(e?.message ?? e) } }),
     ).finally(done)
     return
   }
-  const wait = ready ?? Promise.reject(new Error("the host has not been initialised"))
   if (msg.method === "fetch") {
-    wait.then(() => doFetch(msg.id, msg.params ?? {}), (e) => send({ id: msg.id, error: { message: String(e?.message ?? e) } })).finally(done)
+    const id = msg.id
+    // the fetch is owned the moment its message is read, before the async
+    // setup below: an abort that comes before the upstream is reached still
+    // stops it, and one that comes during the await is not missed
+    const record = {
+      state: "setup", controller: new AbortController(),
+      gate: makeGate(msg.params?.window > 0 ? msg.params.window : 512 << 10),
+      pendingSend: null, readyCleanup: null, unconsumedBody: undefined,
+    }
+    inflight.set(id, record)
+    // waiting for the host to be ready is the host's own await: an abort must
+    // end it too, so a request whose setup never finishes still runs its
+    // finally and lets its controller, gate and body go. The shared setup
+    // promise itself is not cancelled — only this request's wait on it.
+    const start = () => {
+      checkFetch(record)
+      return doFetch(id, record, msg.params ?? {})
+    }
+    waitForReady(record).then(start)
+      .catch((e) => {
+        transitionFetch(record, "finishing")
+        return sendForFetch(record, { id, error: { message: String(e?.message ?? e) } })
+      })
+      .finally(() => {
+        transitionFetch(record, "finished")
+        inflight.delete(id)
+        done()
+      })
     return
   }
+  const wait = ready ?? Promise.reject(new Error("the host has not been initialised"))
   const fn = handlers[msg.method]
   if (!fn) {
     send({ id: msg.id, error: { message: `no method ${msg.method}` } })

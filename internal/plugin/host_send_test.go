@@ -89,9 +89,26 @@ func (c *wireIn) fetchFrame(t *testing.T) []byte {
 func newWireHost(tb testing.TB, in *wireIn) (*host, *io.PipeWriter) {
 	tb.Helper()
 	pr, pw := io.Pipe()
-	h := &host{cmd: &exec.Cmd{}, in: in, calls: map[int64]*call{}, dead: make(chan struct{})}
+	hctx, hcancel := context.WithCancel(context.Background())
+	h := &host{
+		cmd: &exec.Cmd{}, in: in,
+		calls:    map[int64]*call{},
+		dead:     make(chan struct{}),
+		slots:    make(chan struct{}, callLimit()),
+		streams:  make(chan struct{}, streamLimit()),
+		out:      make(chan writeReq, callLimit()),
+		ctrl:     map[int64]*ctrl{},
+		ctrlWake: make(chan struct{}, 1),
+		ctx:      hctx,
+		cancel:   hcancel,
+	}
 	go h.read(pr)
-	tb.Cleanup(func() { _ = pw.CloseWithError(io.EOF) })
+	go h.writerLoop()
+	go h.ctrlLoop()
+	tb.Cleanup(func() {
+		_ = pw.CloseWithError(io.EOF)
+		hcancel()
+	})
 	return h, pw
 }
 
@@ -187,20 +204,21 @@ func fetchOnce(t *testing.T, r FetchRequest) []byte {
 	return line
 }
 
-// legacyFetchParams is the anonymous params struct Fetch built before the body
-// went to encoding/json as a []byte: the same tags, the body as the base64
-// string EncodeToString made of it.
-func legacyFetchParams(r FetchRequest) any {
+// expectedFetchParams is the params struct Fetch builds: the body as the
+// base64 string encoding/json writes for a []byte, and the credit window the
+// flow control added.
+func expectedFetchParams(r FetchRequest) any {
 	return struct {
 		FetchRequest
-		Body string `json:"body,omitempty"`
-	}{r, base64.StdEncoding.EncodeToString(r.Body)}
+		Body   string `json:"body,omitempty"`
+		Window int    `json:"window"`
+	}{r, base64.StdEncoding.EncodeToString(r.Body), streamWindow}
 }
 
-// legacyFrame is the frame the older Fetch would have written for r, id and all.
-func legacyFrame(t *testing.T, id int64, r FetchRequest) []byte {
+// expectedFrame is the frame Fetch writes for r, id and all.
+func expectedFrame(t *testing.T, id int64, r FetchRequest) []byte {
 	t.Helper()
-	b, err := json.Marshal(map[string]any{"id": id, "method": "fetch", "params": legacyFetchParams(r)})
+	b, err := json.Marshal(map[string]any{"id": id, "method": "fetch", "params": expectedFetchParams(r)})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -264,6 +282,67 @@ func TestFetchHostKeepsTheRestartSignal(t *testing.T) {
 	}
 }
 
+// TestFetchStreamsHeadChunksFinal: a whole reply — head, chunks, final — sent
+// in one burst down the same pipe reaches Fetch's body byte for byte, and the
+// bytes the reader takes are credited back to the child. Unlike fetchOnce,
+// which ends a call by cancelling it, this drives the real final answer, so the
+// head/chunks/final ordering is covered end to end.
+func TestFetchStreamsHeadChunksFinal(t *testing.T) {
+	in := newWireIn(true)
+	h, pw := newWireHost(t, in)
+	checkList()
+	hostMu.Lock()
+	prev, prevStale := current, hostStale.Swap(false)
+	current = h
+	hostMu.Unlock()
+	t.Cleanup(func() {
+		hostMu.Lock()
+		current = prev
+		if prevStale {
+			hostStale.Store(true)
+		}
+		hostMu.Unlock()
+	})
+
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 4096) // 64 KiB
+	go func() {
+		<-in.wrote // the fetch frame
+		var m struct {
+			ID int64 `json:"id"`
+		}
+		if json.Unmarshal(bytes.TrimSuffix(in.lastLine(), []byte("\n")), &m) != nil || m.ID == 0 {
+			return
+		}
+		write := func(v any) {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return
+			}
+			_, _ = pw.Write(append(b, '\n'))
+		}
+		write(map[string]any{"id": m.ID, "event": "head", "status": 200, "headers": map[string]string{"content-type": "text/event-stream"}})
+		for off := 0; off < len(payload); off += 4096 {
+			write(map[string]any{"id": m.ID, "event": "chunk", "data": base64.StdEncoding.EncodeToString(payload[off : off+4096])})
+		}
+		write(map[string]any{"id": m.ID, "result": nil})
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res, err := Fetch(ctx, benchRequest([]byte("hello")))
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("body = %d bytes, want %d", len(got), len(payload))
+	}
+	res.Body.Close()
+}
+
 func TestFetchBodyWireIsUnchanged(t *testing.T) {
 	htmlUnicode := "a<b>&\"c\" — 你好 <script>"
 	for _, tc := range []struct {
@@ -298,9 +377,9 @@ func TestFetchBodyWireIsUnchanged(t *testing.T) {
 				t.Fatalf("frame = %+v", got)
 			}
 
-			// the older params build the same frame, byte for byte (the
+			// the params Fetch builds give the same frame, byte for byte (the
 			// metadata above is there to keep escaping and ordering pinned)
-			want := legacyFrame(t, got.ID, r)
+			want := expectedFrame(t, got.ID, r)
 			if !bytes.Equal(line, want) {
 				t.Fatalf("the wire changed:\n got %s\nwant %s", clip(line), clip(want))
 			}

@@ -560,23 +560,27 @@ func TestHostStreamHeadChunksFinal(t *testing.T) {
 		for i := range 50 {
 			f.chunk(id, chunkAt(i))
 		}
-		f.answer(id, "")
 	}); h.Status != 200 {
 		t.Fatalf("head = %+v", h)
 	}
-	got, err := io.ReadAll(b)
-	if err != nil {
+	want := chunks(50)
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(b, got); err != nil {
 		t.Fatalf("reading: %v", err)
 	}
-	want := chunks(50)
 	if string(got) != want {
 		t.Fatalf("stream = %q, want %q", got, want)
 	}
 	// every delivered byte is credited back, plus a frame's overhead as each
 	// frame is done, so the child is never left short of what it sent
-	waitFor(t, "the credits were given back", func() bool { return f.credited() >= len(want) })
-	if got := c.owedBytes(); got > frameOverhead {
+	wantCredit := len(want) + 49*frameOverhead
+	waitFor(t, "the credits were given back", func() bool { return f.credited() == wantCredit })
+	if got := c.owedBytes(); got != frameOverhead {
 		t.Fatalf("%d bytes still owed after a full read", got)
+	}
+	f.answer(id, "")
+	if n, err := b.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("final read = %d, %v, want 0, EOF", n, err)
 	}
 }
 

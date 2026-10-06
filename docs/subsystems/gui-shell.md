@@ -45,6 +45,16 @@ dirty group draft; Cancel retains the draft and Discard opens the new editor.
 `newGroupWith` applies the same guard when creating a group from a model and
 waits for `show` to accept navigation before creating its draft.
 
+The native Usage window wraps its header and session strips at narrow
+widths; a wrapped strip highlights only the selected row, and resizing
+refits that highlight. Period controls on the window and tray keep their
+visible position before a redraw: a new pick continues from it, while an
+answer redrawing the same choice lands on that choice without replaying the
+slide. The tray's period buttons stay connected across an answer, so a
+redraw between pressing and releasing one still delivers its click.
+`usage-narrow.test.cjs` and `panel-usage-period.test.cjs` guard these layout
+and interaction paths.
+
 ## Verification
 
 ```sh

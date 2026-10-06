@@ -1998,3 +1998,7 @@ Chinese, Chromium and WebKit.
 ```sh
 node --test internal/gui/tests/library-rtk-nohook.test.cjs
 ```
+
+`usage-narrow.test.cjs` checks the native Usage window at 950, 760 and 560px: controls and long sums stay together, session chips wrap without overflow, each highlight follows its selected row through resizing, and chart dates stay apart.
+
+`panel-usage-period.test.cjs` samples the period highlight across response-driven redraws and rapid picks. It must not jump back before reaching the selected option, and a response arriving while a period is pressed must preserve that click. Both engines and English and Chinese are covered.

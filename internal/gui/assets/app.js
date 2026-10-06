@@ -7205,6 +7205,16 @@ function thumbKey(box, choices) {
   }
   return null;
 }
+// Before Usage rebuilds a period strip, retain the visible position of its
+// current transition. A quick second pick then continues there, not at the
+// first pick's starting point or at a target it has not reached yet.
+function keepThumb(box, key) {
+  const th = box?.querySelector(":scope > .thumb");
+  const last = box && thumbs.get(thumbKey(box, key));
+  if (!th || !last) return;
+  const style = getComputedStyle(th);
+  last.current = { x: new DOMMatrixReadOnly(style.transform).m41, w: parseFloat(style.width) };
+}
 function slide(box, key) {
   let th = box.querySelector(":scope > .thumb");
   const fresh = !th;
@@ -7212,13 +7222,15 @@ function slide(box, key) {
   const on = box.querySelector(":scope > .on");
   if (!on) { th.style.opacity = "0"; return; }
   th.style.opacity = "";
+  placeThumb(th, box, on);
   const to = { x: on.offsetLeft, w: on.offsetWidth };
   const control = thumbKey(box, key);
   const last = control && thumbs.get(control);
   let from = to;
   const put = (p) => { th.style.transform = `translateX(${p.x}px)`; th.style.width = p.w + "px"; };
   if (fresh) {
-    from = last ? (performance.now() - last.at < 300 ? last.from : last) : to;
+    const same = last && last.x === to.x && last.w === to.w;
+    from = last ? (same ? to : last.current || (performance.now() - last.at < 300 ? last.from : last)) : to;
     th.classList.add("still");
     put(from);
     void th.offsetWidth;
@@ -12084,6 +12096,7 @@ function loadQuotas(asked, again) {
 // the period picker, in the page's head, for the Overview and Requests
 function renderPeriod(loading) {
   const seg = $("#period");
+  keepThumb(seg, "period");
   seg.replaceChildren();
   for (const [id, name] of PERIODS) {
     const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
@@ -13097,10 +13110,14 @@ function renderPanelUse() {
   const focusDay = box.contains(document.activeElement) ? document.activeElement.dataset.day : "";
   const l = panelUse;
   box.hidden = false;
-  const bar = el("div", "pu-bar");
-  const per = el("div", "segs");
-  for (const [id, name] of PANEL_USE_PERIODS) {
-    const b = el("button", "opt" + (id === panelUsePeriod ? " on" : ""), t(name));
+  // Keep the period buttons connected while an answer redraws the totals:
+  // replacing one between pointerdown and pointerup would lose its click.
+  const bar = box.querySelector(":scope > .pu-bar") || el("div", "pu-bar");
+  const per = bar.querySelector(":scope > .segs") || el("div", "segs");
+  for (const [i, [id, name]] of PANEL_USE_PERIODS.entries()) {
+    const b = per.querySelectorAll(":scope > .opt")[i] || el("button", "opt");
+    b.classList.toggle("on", id === panelUsePeriod);
+    if (b.textContent !== t(name)) b.textContent = t(name);
     b.onclick = () => {
       if (id === panelUsePeriod) return;
       panelUsePeriod = id;
@@ -13109,7 +13126,7 @@ function renderPanelUse() {
       renderPanelUse();
       loadPanelUse().catch(() => {});
     };
-    per.append(b);
+    if (!b.parentElement) per.append(b);
   }
   const pick = el("button", "sess-pick");
   pick.type = "button";
@@ -13140,8 +13157,15 @@ function renderPanelUse() {
     b.classList.add("spin");
     loadPanelUse().catch(() => {}).finally(() => setTimeout(() => $("#panelUsage .pu-again")?.classList.remove("spin"), 300));
   };
-  bar.append(per, ...(copts.length ? [comp] : []), pick, el("span", "grow"), again, open);
-  const out = [bar, el("p", "usage-note", t("Gateway and session-log calls; local rejections excluded from totals."))];
+  for (const child of [...bar.children]) if (child !== per) child.remove();
+  if (!per.parentElement) bar.append(per);
+  bar.append(...(copts.length ? [comp] : []), pick, el("span", "grow"), again, open);
+  const out = [el("p", "usage-note", t("Gateway and session-log calls; local rejections excluded from totals."))];
+  const paint = () => {
+    for (const child of [...box.children]) if (child !== bar) child.remove();
+    if (!bar.parentElement) box.append(bar);
+    box.append(...out);
+  };
   if (!l) {
     out.push(el("span", "skeleton pu-sk"), el("span", "skeleton pu-sk"));
   } else if (!l.total && !l.day) {
@@ -13183,7 +13207,7 @@ function renderPanelUse() {
     const chart = el("div", "led-chart"), rank = el("div", "led-rank");
     card.append(head, chart, rank);
     out.push(tot, card);
-    box.replaceChildren(...out);
+    paint();
     slide(per, "puPeriod");
     slide(met, "puMetric");
     drawLedColumns(chart, l, split, panelUseMetric, true, (day) => {
@@ -13201,7 +13225,7 @@ function renderPanelUse() {
     fit();
     return;
   }
-  box.replaceChildren(...out);
+  paint();
   slide(per, "puPeriod");
   if (v.scrollTop !== keep) v.scrollTop = keep;
   fit();
@@ -13988,12 +14012,15 @@ function quotaWindows(sub) {
 
 // Keep the last date and as many earlier dates as fit, without clipping their
 // text. Visibility keeps each label aligned to its bar; resizing restores them.
+// This ran for the browser's phones alone; a native window is narrow too, and
+// nothing there says so (a user at 950px: the dates ran one into the next), so
+// a label is now hidden wherever it would collide with its neighbour.
 function fitChartLabels() {
-  const narrow = web && matchMedia("(max-width: 760px), (pointer: coarse) and (max-width: 1024px)").matches;
+  const fits = !web || matchMedia("(max-width: 760px), (pointer: coarse) and (max-width: 1024px)").matches;
   for (const labels of document.querySelectorAll(".chart .labels")) {
     const spans = [...labels.children];
     for (const span of spans) span.style.visibility = "";
-    if (!narrow || !labels.offsetWidth) continue;
+    if (!fits || !labels.offsetWidth) continue;
     const box = labels.getBoundingClientRect();
     let right = box.right + 8;
     for (const span of spans.reverse()) {
@@ -16726,16 +16753,56 @@ function setWarmTab(tab, remember) {
 // a pill drawn while its card was hidden measured nothing: its thumb is
 // put under the option picked, still, once the card is shown
 function thumbsUnderPicks(box) {
-  for (const th of box.querySelectorAll(".segs > .thumb")) {
-    const opt = th.parentElement.querySelector(":scope > .on");
-    if (!opt || !opt.offsetParent || parseFloat(th.style.width) === opt.offsetWidth) continue;
-    th.classList.add("still");
-    th.style.transform = `translateX(${opt.offsetLeft}px)`;
-    th.style.width = opt.offsetWidth + "px";
-    void th.offsetWidth;
-    th.classList.remove("still");
-  }
+  for (const th of box.querySelectorAll(".segs > .thumb")) thumbToPick(th, false);
 }
+// put a strip's thumb under the option picked, now, without the glide: the
+// width it was drawn at is what tells a thumb still to be placed (nothing
+// measured while hidden); `force` is for a resize, which moves it without
+// the reader's asking.
+function thumbToPick(th, force) {
+  const box = th.parentElement, on = box.querySelector(":scope > .on");
+  if (!on || !on.offsetParent) return;
+  if (!force && parseFloat(th.style.width) === on.offsetWidth) return;
+  th.classList.add("still");
+  placeThumb(th, box, on);
+  th.style.transform = `translateX(${on.offsetLeft}px)`;
+  th.style.width = on.offsetWidth + "px";
+  void th.offsetWidth;
+  th.classList.remove("still");
+}
+// A strip's thumb is normally as tall as the strip, its top and bottom from
+// its own CSS (the nav's 2px, a stream's 1.5px inset), which is right while
+// the options share one row. A strip that wraps — the agent chips and the
+// chart's metrics in a narrow window — puts them on several rows, and a thumb
+// stretched from the strip's top to its foot then covers every row instead of
+// the one picked (a user's 560px window: three rows of chips under one slab).
+// There the thumb takes the picked option's own row, from its offset — an
+// integer, so the fractional insets of a single-row strip keep their own box.
+function stripWraps(box, on) {
+  return [...box.querySelectorAll(":scope > .opt")].some((b) => b.offsetTop !== on.offsetTop);
+}
+function placeThumb(th, box, on) {
+  if (stripWraps(box, on)) { th.style.top = on.offsetTop + "px"; th.style.height = on.offsetHeight + "px"; th.style.bottom = "auto"; }
+  else { th.style.top = ""; th.style.height = ""; th.style.bottom = ""; }
+}
+// A window's width, not the reader, decides whether a strip wraps, and no
+// slide follows a resize: the thumbs that a wrap moved (or that a wider
+// window unwrapped) are put back on their option, still. A strip that never
+// wrapped is left to its own CSS, so a resize costs it nothing. The width
+// arrives in a stream while the window is dragged, so the sweep is coalesced
+// to one a frame.
+let thumbRefit = 0;
+addEventListener("resize", () => {
+  if (thumbRefit) return;
+  thumbRefit = requestAnimationFrame(() => {
+    thumbRefit = 0;
+    fitChartLabels();
+    for (const th of document.querySelectorAll(".thumb")) {
+      const box = th.parentElement, on = box?.querySelector(":scope > .on");
+      if (on && (th.style.top || stripWraps(box, on))) thumbToPick(th, true);
+    }
+  });
+});
 // A tab list's keys: the arrows, Home and End move along its shown tabs,
 // and the tab reached is clicked, so the page is held as for a click
 function tabKeys(tabs, sel) {
@@ -18992,7 +19059,12 @@ async function show(v) {
   $("#prefs").classList.toggle("on", v === "settings");
   for (const id of ["agents", "providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"]) $("#view-" + id).hidden = v !== id;
   // back to where the reader was in it, and again once it has what it loads
-  const back = () => backToReader($("#view-" + v));
+  const back = () => {
+    const page = $("#view-" + v);
+    backToReader(page);
+    // A hidden Usage page could not refit its strips when the window resized.
+    if (v === "usage") for (const th of page.querySelectorAll(".segs > .thumb")) thumbToPick(th, true);
+  };
   requestAnimationFrame(back);
   closePicker();
   closeAgentModels();
@@ -19194,7 +19266,7 @@ if (mode === "window") new ResizeObserver(() => {
   thumbs.set(thumbKey($("#nav"), "nav"), { x: on.offsetLeft, w: on.offsetWidth });
   requestAnimationFrame(() => th.classList.remove("still"));
 }).observe($("#nav"));
-document.fonts?.ready.then(fitTop);
+document.fonts?.ready.then(() => { fitTop(); fitChartLabels(); });
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); wag(); } });
 // an agent's config can be rewritten, or the agent run round magpie, while the

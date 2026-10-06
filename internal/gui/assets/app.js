@@ -12517,6 +12517,20 @@ function keysFolded(subs) {
   const rest = subs.filter((q) => !shown.has(q));
   return new Set(rest.length > 1 ? rest : []);
 }
+// After folding a tall card, the reader may settle at the page's end with
+// the new button above the viewport. Keep that button reachable.
+function keepAcctFoldButtonVisible(view, provider) {
+  const card = [...view.querySelectorAll("#subscriptionUsage > .subscription-card")].find((c) => c.dataset.key === provider);
+  const button = card?.querySelector(".quota-accts-more");
+  if (!button) return;
+  const above = button.getBoundingClientRect().top - view.getBoundingClientRect().top - 8;
+  if (above >= 0) return;
+  // The click guard held the old button. Release it now that the replacement
+  // needs a different scroll position, and record where the reader landed.
+  if (held?.v === view) held = null;
+  view.scrollTop += above;
+  readerLeaves(view);
+}
 function keysMore(provider, n) {
   const b = el("button", "text quota-keys-more", n ? t("Show {n} more keys", { n }) : t("Show fewer keys"));
   b.type = "button";
@@ -12555,7 +12569,9 @@ function acctsMore(provider, n) {
     if (n) usageAcctsAll.add(provider); else usageAcctsAll.delete(provider);
     try { localStorage.setItem("magpie.usageAcctsAll", JSON.stringify([...usageAcctsAll])); } catch {}
     renderQuotas();
-    backToReader($("#view-usage"));
+    const view = $("#view-usage");
+    backToReader(view);
+    if (!n) keepAcctFoldButtonVisible(view, provider);
   };
   return b;
 }
@@ -12824,9 +12840,9 @@ function durText(ms) {
 }
 // forecastVerdict: what a window's forecast says, as a class and the copy a
 // card's header shows. The backend sends numbers, never display strings, and
-// no forecast at all reads as too little to say (state "none").
+// absent or young forecasts have no verdict; the observations still draw.
 function forecastVerdict(f) {
-  if (!f || f.state === "none") return { cls: "thin", hist: false, text: t("Too few readings") };
+  if (!f || f.state === "none") return null;
   if (f.state === "spent") return { cls: "risk", hist: false, text: t("Used up") };
   const hist = f.source === "history";
   if (f.lastsToReset) {
@@ -13089,7 +13105,7 @@ function quotaPlot(line) {
 }
 // quotaReadings: a line's last eight readings, newest first, each what was
 // left and when it was read (#802), a line each, ↻ where the window
-// started again; for its legend key's title, the card keeping no control
+// started again; for its plot's title, the card keeping no control
 // of its own
 function quotaReadings(l, now) {
   const pts = l.points.slice(-8);
@@ -13182,7 +13198,8 @@ function balanceCurve(sub) {
 function quotaVerdictRow(line) {
   const v = forecastVerdict(line.forecast);
   const row = el("div", "qv-row");
-  row.append(el("span", "qv-badge k-" + v.cls, t(line.window.name)));
+  row.append(el("span", "qv-badge k-" + (v?.cls || "thin"), t(line.window.name)));
+  if (!v) return row;
   const text = el("span", "qv-text k-" + v.cls, v.text);
   text.title = v.text;
   if (v.hist) {
@@ -13894,6 +13911,7 @@ function panelQuotaCard(q) {
     const line = quotaLineOf(q, w);
     if (!line) continue; // no readings of this window: no line, as on the page
     const v = forecastVerdict(line.forecast);
+    if (!v) continue;
     const r = el("span", "pq-verdict k-" + v.cls);
     const say = el("span", "", v.text);
     if (v.hist) say.append(" ", el("i", "pq-src", t("history")));
@@ -14463,6 +14481,13 @@ function familyQuota(sub, brief) {
     box.replaceWith(next);
     box = next;
     label();
+    // The wall can keep the same size across a model/family toggle, so its
+    // resize observer need not fire. Measure the new windows once attached.
+    requestAnimationFrame(() => {
+      if (!next.isConnected) return;
+      drawQuotaPlots(next);
+      fitQuotaLabels(next.parentElement);
+    });
   };
   return [box, b];
 }

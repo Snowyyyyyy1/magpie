@@ -611,3 +611,55 @@ func TestQuotaForecastOldReading(t *testing.T) {
 		t.Fatalf("new cycle reused old verdict: %+v %v", f, ok)
 	}
 }
+
+// Kiro's monthly credits were 67% left about 6% into its cycle. A clear
+// early burn must warn without waiting for 8%; a near-even burn still waits.
+func TestQuotaForecastEarlyBurn(t *testing.T) {
+	dur := 30 * 24 * time.Hour
+	for _, tt := range []struct {
+		name    string
+		elapsed time.Duration
+		left    float64
+		state   string
+	}{
+		{"Kiro monthly 6% elapsed, 67% left", dur * 6 / 100, 67, "ok"},
+		{"slightly early, 6% elapsed, 90% left", dur * 6 / 100, 90, "none"},
+		{"crossing just after halfway to reset", dur * 6 / 100, 88.68, "none"},
+		{"crossing just before halfway to reset", dur * 6 / 100, 88.67, "ok"},
+		{"little consumed, 6% elapsed, 97% left", dur * 6 / 100, 97, "none"},
+		{"half percent used after 30 minutes", 30 * time.Minute, 99.5, "none"},
+		{"one percent used after 30 minutes", 30 * time.Minute, 99, "none"},
+		{"five percent used after 30 minutes", 30 * time.Minute, 95, "none"},
+		{"just under ten percent used after 30 minutes", 30 * time.Minute, 90.01, "none"},
+		{"ten percent used after 30 minutes", 30 * time.Minute, 90, "ok"},
+		{"heavy burn before 30 minutes", 29 * time.Minute, 67, "none"},
+		{"heavy burn at 30 minutes", 30 * time.Minute, 67, "ok"},
+		{"heavy burn after 30 minutes", 31 * time.Minute, 67, "ok"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			start := forecastNow.Add(-tt.elapsed)
+			points := cyclePoints(start, dur, [2]float64{0, 100}, [2]float64{float64(tt.elapsed) / float64(dur), tt.left})
+			f, ok := quotaForecast("Monthly", points, forecastNow)
+			if !ok || f.State != tt.state {
+				t.Fatalf("forecast = %+v, %v; want %s", f, ok, tt.state)
+			}
+			if tt.state == "none" {
+				if f.RunsOutAt != nil || f.EtaSeconds != 0 {
+					t.Fatalf("young near-even cycle projected empty: %+v", f)
+				}
+				return
+			}
+			if f.LastsToReset || f.RunsOutAt == nil || f.EtaSeconds <= 0 || f.LeftAtReset >= 0 {
+				t.Fatalf("early burn did not warn: %+v", f)
+			}
+			if tt.left == 67 && tt.elapsed == dur*6/100 {
+				eq2(t, f.Left, 67, "left")
+				eq2(t, f.EvenLeft, 94, "even left")
+			}
+			// The short display history must not invent a rate from one reading.
+			if _, ok := quotaForecast("Monthly", points[1:], forecastNow); ok {
+				t.Fatal("one reading got a forecast")
+			}
+		})
+	}
+}

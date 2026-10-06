@@ -1712,8 +1712,8 @@ fmtCost error behind the assertions, and the error banner is asserted empty.
 `quota-forecast.test.cjs` checks what each window's forecast says (the
 backend's numbers, never display strings): "Lasts to reset" with the multiple
 it leaves, "Runs out in …" with the time left — one sentence whichever layer
-answered, the history marker beside it saying which — "Used up", and "Too
-few readings" for a window the backend gave no forecast; the delta from an
+answered, the history marker beside it saying which — "Used up", and no
+verdict for an absent forecast or `none` state; the delta from an
 even burn at the header's right (ahead, behind, level); the dotted projection
 to the floor where it runs out and to the reset edge where it lasts, drawn
 only where a forecast came; the history marker; the one legend in the head;
@@ -1722,7 +1722,10 @@ readings gets no more than the card does. A run-out the backend gave no usable
 time for says only that it runs out, and a headroom past ten times the even
 burn reads as "10x+". Every plot's content is measured against its viewBox
 (the markers are not cut by the plot's edge), every string is checked in
-Chinese, English, Japanese and German, in light and dark.
+Chinese, English, Japanese and German, in light and dark. Unknown cycle
+timing with many readings, untouched cycles, young cycles and single
+readings retain observations without a verdict. Model/family toggles redraw
+at their attached width and refit counts while the wall's size stays fixed.
 
 `balance-curve.test.cjs` checks a key's balance over time on the Usage page:
 its readings as a line, the least-squares line since the last top-up dashed

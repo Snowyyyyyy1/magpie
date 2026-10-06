@@ -55,8 +55,11 @@ coverage. The more conservative result wins: either layer can warn that the
 allowance runs out. Unknown cycles, insufficient readings and expired resets
 have no forecast; `state: "none"` means the cycle is too young or too little
 is consumed, `"spent"` means an observed depleted allowance, and `"ok"`
-means a projection is available. The backend returns numbers and enums;
-labels belong to the UI's translations.
+means a projection is available. Below 8% of a cycle, a clear early run-out
+still gets a projection once 30 minutes have elapsed, at least 10% has been
+used and the even-burn ETA is at most half the time remaining to reset.
+Smaller or younger early burns wait for more of the cycle. The backend
+returns numbers and enums; labels belong to the UI's translations.
 
 A forecast's `asOf` is its last observation, which fixes its rate, ahead
 percentage, verdict, projected `leftAtReset` and `headroom`. Unobserved time
@@ -67,13 +70,17 @@ an observed `"spent"` state. A reset that has passed ends the forecast,
 and readings from a new cycle cannot reuse the previous cycle's verdict.
 
 The Usage page and tray share the same verdict in
-[`app.js`](../../internal/gui/assets/app.js). Each full account window has
-its own burn-down, even-burn line and projected crossing or reset remainder.
+[`app.js`](../../internal/gui/assets/app.js). An absent forecast or `"none"`
+state shows no verdict; actual readings and their times remain available.
+Each full account window has its own burn-down, even-burn line and projected
+crossing or reset remainder.
 The actual dot is at the reading's time, with a reading tooltip; the vertical
 line marks now. The shared legend explains the marks, and the range menu
 changes charts without changing the verdict. Brief accounts retain meters
 only. Clicking a plot or pressing Enter enlarges it without scrolling; the
-tray keeps a compact verdict and sparkline. Resizing redraws from the stable
+tray keeps a compact verdict and sparkline. Model/family switches redraw
+and fit the new windows after insertion, even when the card wall's size
+stays the same. Resizing redraws from the stable
 card container on the next animation frame, avoiding WebKit observer loops.
 
 ## Constraints and failure behavior

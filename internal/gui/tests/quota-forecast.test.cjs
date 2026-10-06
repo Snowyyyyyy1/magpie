@@ -9,9 +9,8 @@
 // there only where the backend sent a forecast to project. One legend now
 // stands in the allowances' head rather than on every card. The tray panel's
 // card carries the same verdict, one compact line a window. The backend's
-// numbers are the only input: it sends no display strings, and a window it
-// gives no forecast is read here as "Too few readings". A window the account
-// has no readings of gets no verdict, in the tray as on the page. English and
+// numbers are the only input: it sends no display strings. A window with no
+// forecast, state none, or no readings has no verdict in the tray or page. English and
 // Chinese, light and dark, Chromium at least; the API is faked here, with a
 // complete /api/usage body so the page's own errors stay visible to this test.
 // Every plot's content is measured against its viewBox: the geometry insets
@@ -123,7 +122,7 @@ const words = {
     lasts: "Lasts to reset · 1.3×", lastsHist: "Lasts to reset · 1.4×",
     runout: "Runs out in 2h 30m",
     histRunout: "Runs out in 1d 10h",
-    thin: "Too few readings", spent: "Used up",
+    spent: "Used up",
     ahead: "12% ahead", behind: "8% behind", even: "On pace",
     hist: "history", legend: ["Actual left", "Even burn", "Projected at this rate"],
     rest: "Left at reset: 20%", zero: "Runs out",
@@ -133,7 +132,7 @@ const words = {
     lasts: "撑得到重置 · 1.3× 余量", lastsHist: "撑得到重置 · 1.4× 余量",
     runout: "2 小时 30 分后用完",
     histRunout: "1 天 10 小时后用完",
-    thin: "数据太少", spent: "已用完",
+    spent: "已用完",
     ahead: "领先 12%", behind: "落后 8%", even: "匀速",
     hist: "历史", legend: ["实际剩余", "匀速消耗", "按当前速度预测"],
     rest: "重置时剩 20%", zero: "预计用完",
@@ -142,7 +141,7 @@ const words = {
     five: "5 時間", week: "週", monthly: "毎月", daily: "毎日",
     lasts: "リセットまで持つ · 1.3× 余裕", lastsHist: "リセットまで持つ · 1.4× 余裕",
     runout: "2 時間 30 分後に使い切り", histRunout: "1 日 10 時間後に使い切り",
-    thin: "データが不足", spent: "使い切り", ahead: "12% 余裕", behind: "8% 超過", even: "均等なペース",
+    spent: "使い切り", ahead: "12% 余裕", behind: "8% 超過", even: "均等なペース",
     hist: "履歴", legend: ["実際の残量", "均等な消費", "現在のペースで予測"],
     rest: "リセット時の残量：20%", zero: "使い切り予測",
   },
@@ -150,7 +149,7 @@ const words = {
     five: "5 Stunden", week: "Wöchentlich", monthly: "Monatlich", daily: "Täglich",
     lasts: "Reicht bis zum Reset · 1.3× Reserve", lastsHist: "Reicht bis zum Reset · 1.4× Reserve",
     runout: "Leer in 2 Std. 30 Min.", histRunout: "Leer in 1 T. 10 Std.",
-    thin: "Zu wenige Messwerte", spent: "Aufgebraucht", ahead: "12% voraus", behind: "8% zurück", even: "Im Plan",
+    spent: "Aufgebraucht", ahead: "12% voraus", behind: "8% zurück", even: "Im Plan",
     hist: "Verlauf", legend: ["Tatsächlicher Rest", "Gleichmäßiger Verbrauch", "Prognose bei diesem Tempo"],
     rest: "Rest beim Reset: 20%", zero: "Voraussichtlich leer",
   },
@@ -261,9 +260,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // one header a window: its name, the verdict, the delta at the right
         assert.deepEqual(await card.locator(".qv-badge").allTextContents(), [w.five, w.week, w.monthly, w.daily]);
         assert.deepEqual(await card.locator(".qv-text").allTextContents(),
-          [w.lasts, w.runout, w.histRunout + " " + w.hist, w.thin]);
+          [w.lasts, w.runout, w.histRunout + " " + w.hist]);
         assert.deepEqual(await card.locator(".qv-text").evaluateAll((es) => es.map((e) => e.className)),
-          ["qv-text k-safe", "qv-text k-warn", "qv-text k-warn", "qv-text k-thin"]);
+          ["qv-text k-safe", "qv-text k-warn", "qv-text k-warn"]);
         assert.deepEqual(await gem.locator(".qv-text").allTextContents(),
           [w.spent, w.lastsHist + " " + w.hist]);
         assert.deepEqual(await gem.locator(".qv-text").evaluateAll((es) => es.map((e) => e.className)),
@@ -410,4 +409,95 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.match(await verdict.getAttribute("class"), /k-warn/);
     assert.equal(await plot.locator(".qc-axis .axzero").textContent(), "Runs out");
   });
+}
+
+// Plenty of readings without cycle timing, untouched cycles, young cycles,
+// and one reading all keep their observed curve without a false verdict.
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  for (const lang of ["en", "zh", "ja", "de"]) {
+    test(`${engine} ${lang}: a window without a projection shows only observations`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
+      t.after(() => browser.close());
+      const now = Date.now(), reset = now + 2 * H;
+      const names = ["Untouched", "Unknown cycle", "One reading", "Young cycle"];
+      const data = {
+        quotas: [{ provider: "codex", name: "Codex", user: "idle@example.com", windows: names.map((name) => ({ name, used: 0, resetsAt: iso(reset) })) }],
+        history: [{ provider: "codex", user: "idle@example.com", lines: [
+          { name: names[0], points: Array.from({ length: 37 }, (_, i) => ({ at: iso(now - (36 - i) * 60000), left: 100, start: iso(now - 3 * H), resetsAt: iso(reset) })), forecast: { state: "none", left: 100, cycleStart: iso(now - 3 * H), resetsAt: iso(reset) } },
+          { name: names[1], points: Array.from({ length: 15 }, (_, i) => ({ at: iso(now - (14 - i) * 60000), left: 85 - i })) },
+          { name: names[2], points: [{ at: iso(now), left: 80 }] },
+          { name: names[3], points: cycle(now - 12 * 60000, now, 100, 99), forecast: { state: "none", left: 99, cycleStart: iso(now - 12 * 60000), resetsAt: iso(reset) } },
+        ] }],
+      };
+      for (const panel of [false, true]) {
+        const page = await (await browser.newContext({ viewport: { width: panel ? 440 : 1000, height: 800 }, reducedMotion: "reduce" })).newPage();
+        const errors = [];
+        page.on("pageerror", (e) => errors.push(e.message));
+        await page.route("**/*", serve(lang, "light", panel, data));
+        await page.goto("http://magpie.test/" + (panel ? "?mode=panel" : "?view=usage"));
+        if (panel) await page.locator('#ptabs [data-ptab="usage"]').click();
+        const card = page.locator(panel ? ".pq-card" : ".subscription-card", { hasText: panel ? "idle@example.com" : "Codex" });
+        await card.waitFor();
+        assert.equal(await card.locator(".qv-text, .pq-verdict").count(), 0, "no verdict when there is no projection, regardless of the reason");
+        if (!panel) {
+          assert.equal(await card.locator(".quota-plot").count(), 4, "all observed curves remain reachable");
+          assert.equal(await card.locator("circle.qc-dot title").count(), 4, "each latest reading still has its time");
+          assert.equal(await card.locator("path.qc-proj").count(), 0);
+        }
+        assert.deepEqual(errors, []);
+        await page.close();
+      }
+    });
+
+    test(`${engine} ${lang}: family toggles draw at the attached width and refit counts`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
+      t.after(() => browser.close());
+      const now = Date.now(), reset = now + 3 * H;
+      const windows = ["Gemini", "Claude"].flatMap((family) => ["High", "Low"].map((level, i) => ({
+        name: `${family} 3.7 Pro advanced thinking model (${level})`, family, used: 30 - i * 10, resetsAt: iso(reset),
+        amount: 1234567890, limit: 9876543210, unit: "credits",
+      })));
+      const data = {
+        quotas: [{ provider: "antigravity", name: "Antigravity", user: "families@example.com", windows }],
+        history: [{ provider: "antigravity", user: "families@example.com", lines: windows.map((w) => ({
+          name: w.name, points: cycle(now - 2 * H, now, 100, 100 - w.used),
+        })) }],
+      };
+      const page = await (await browser.newContext({ viewport: { width: 560, height: 800 }, reducedMotion: "reduce" })).newPage();
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.route("**/*", serve(lang, "light", false, data));
+      await page.goto("http://magpie.test/?view=usage");
+      const card = page.locator(".subscription-card", { hasText: "Antigravity" });
+      const toggle = card.locator(".quota-every");
+      await toggle.waitFor();
+      // A tall neighboring card can hold the wall's dimensions steady. Keep
+      // that case explicit so a container resize cannot repair this toggle.
+      await page.locator("#subscriptionUsage").evaluate((e) => e.style.minHeight = e.clientHeight + 1800 + "px");
+      await page.waitForTimeout(100);
+      const wall = await page.locator("#subscriptionUsage").boundingBox();
+      for (const count of [4, 2, 4]) {
+        await toggle.click();
+        await page.waitForTimeout(100);
+        assert.equal(await card.locator(".quota-plot").count(), count);
+        assert.equal((await page.locator("#subscriptionUsage").boundingBox()).height, wall.height, "wall size stays unchanged across the toggle");
+        const plots = await card.locator(".quota-plot").evaluateAll((es) => es.map((e) => ({
+          width: e.clientWidth, drawn: Number(e.querySelector("svg").getAttribute("viewBox").split(" ")[2]),
+        })));
+        for (const p of plots) assert.equal(p.drawn, Math.max(240, Math.round(p.width)), `attached plot width: ${JSON.stringify(p)}`);
+        const labels = await card.locator(".quota-windows").evaluate((g) => {
+          const needsStack = [...g.querySelectorAll(".quota-labels")].some((l) => {
+            const [name, n] = l.children;
+            const countWidth = [...n.children].reduce((w, c) => w + c.getBoundingClientRect().width, 0) + 4 * (n.children.length - 1);
+            return name.getBoundingClientRect().width + 6 + countWidth > l.clientWidth;
+          });
+          return { needsStack, stacked: g.classList.contains("stacked") };
+        });
+        assert.equal(labels.stacked, labels.needsStack, "counts refit only when they cannot sit beside names");
+        const cut = await card.locator(".quota-n").evaluateAll((es) => es.some((e) => e.scrollWidth > e.clientWidth || [...e.children].some((c) => c.scrollWidth > c.clientWidth)));
+        assert.equal(cut, false, "the count remains whole");
+      }
+      assert.deepEqual(errors, []);
+    });
+  }
 }

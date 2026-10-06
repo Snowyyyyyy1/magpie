@@ -88,8 +88,8 @@ function serve(lang, theme, panel, data) {
 }
 
 const words = {
-  en: { two: "2 days", cycle: "Cycle", off: "Off", trend: (r) => "Trends: " + r, five: "5 hours", week: "Weekly", thin: "Too few readings", legend: ["Actual left", "Even burn", "Projected at this rate"] },
-  zh: { two: "2 天", cycle: "本周期", off: "关闭", trend: (r) => "走势：" + r, five: "5 小时", week: "每周", thin: "数据太少", legend: ["实际剩余", "匀速消耗", "按当前速度预测"] },
+  en: { two: "2 days", cycle: "Cycle", off: "Off", trend: (r) => "Trends: " + r, five: "5 hours", week: "Weekly", legend: ["Actual left", "Even burn", "Projected at this rate"] },
+  zh: { two: "2 天", cycle: "本周期", off: "关闭", trend: (r) => "走势：" + r, five: "5 小时", week: "每周", legend: ["实际剩余", "匀速消耗", "按当前速度预测"] },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -145,7 +145,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await plots.first().waitFor();
         assert.equal(await box.locator(".qv-row").count(), 2, "a header a window");
         assert.deepEqual(await box.locator(".qv-badge").allTextContents(), [w.five, w.week]);
-        assert.deepEqual(await box.locator(".qv-text").allTextContents(), [w.thin, w.thin], "this fixture has no forecasts");
+        assert.deepEqual(await box.locator(".qv-text").allTextContents(), [], "this fixture has no forecasts and no verdicts");
         assert.equal(await plots.nth(0).locator("path.qc-line").getAttribute("data-name"), "5 hours");
         assert.equal(await card.locator(".quota-curve").count(), 0, "the card's one combined curve is gone");
         assert.equal(await page.locator(".quota-windows .qc-legend").count(), 0, "no legend on a card");

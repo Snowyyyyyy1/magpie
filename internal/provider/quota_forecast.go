@@ -57,10 +57,13 @@ type QuotaForecast struct {
 const (
 	// a cycle needs more than one reading
 	forecastMinPoints = 2
-	// below this much of the cycle elapsed, or this little consumed, the
-	// readings say nothing yet
-	forecastMinElapsed  = 0.08
-	forecastNothingUsed = 99.5
+	// Young cycles wait unless enough was consumed after 30 minutes and the
+	// even-burn crossing is in the first half of the time left to reset.
+	forecastMinElapsed         = 0.08
+	forecastEarlyMinElapsed    = 30 * time.Minute
+	forecastEarlyMinUsed       = 10
+	forecastEarlyMaxResetShare = 0.5
+	forecastNothingUsed        = 99.5
 	// at or under this, the window is spent
 	forecastSpentLeft = 0.5
 	// past cycles are used only on a window of two days or more: a 5-hour
@@ -154,8 +157,11 @@ func quotaForecast(name string, points []QuotaPoint, now time.Time) (QuotaForeca
 	case left <= forecastSpentLeft:
 		f.State, f.Source, f.Cycles = "spent", "even", 0
 		f.LastsToReset, f.EtaSeconds, f.Headroom = false, 0, 0
-	case u < forecastMinElapsed || left >= forecastNothingUsed:
-		// too little to go on: the cycle just began, or nothing is spent.
+	case left >= forecastNothingUsed || (u < forecastMinElapsed &&
+		(elapsed < forecastEarlyMinElapsed || 100-left < forecastEarlyMinUsed ||
+			even.lasts || even.etaHours > forecastEarlyMaxResetShare*toReset.Hours())):
+		// Wait on young cycles, except a clear early run-out. Nothing used
+		// yet gives no verdict even with many observations.
 		// state carries the "no verdict", so nothing here claims it lasts.
 		f.State, f.Source, f.Cycles = "none", "even", 0
 		f.LastsToReset, f.EtaSeconds, f.LeftAtReset, f.Headroom = false, 0, 0, 0

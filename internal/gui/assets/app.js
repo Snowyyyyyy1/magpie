@@ -7222,7 +7222,6 @@ function slide(box, key) {
   const on = box.querySelector(":scope > .on");
   if (!on) { th.style.opacity = "0"; return; }
   th.style.opacity = "";
-  placeThumb(th, box, on);
   const to = { x: on.offsetLeft, w: on.offsetWidth };
   const control = thumbKey(box, key);
   const last = control && thumbs.get(control);
@@ -16753,56 +16752,16 @@ function setWarmTab(tab, remember) {
 // a pill drawn while its card was hidden measured nothing: its thumb is
 // put under the option picked, still, once the card is shown
 function thumbsUnderPicks(box) {
-  for (const th of box.querySelectorAll(".segs > .thumb")) thumbToPick(th, false);
+  for (const th of box.querySelectorAll(".segs > .thumb")) {
+    const opt = th.parentElement.querySelector(":scope > .on");
+    if (!opt || !opt.offsetParent || parseFloat(th.style.width) === opt.offsetWidth) continue;
+    th.classList.add("still");
+    th.style.transform = `translateX(${opt.offsetLeft}px)`;
+    th.style.width = opt.offsetWidth + "px";
+    void th.offsetWidth;
+    th.classList.remove("still");
+  }
 }
-// put a strip's thumb under the option picked, now, without the glide: the
-// width it was drawn at is what tells a thumb still to be placed (nothing
-// measured while hidden); `force` is for a resize, which moves it without
-// the reader's asking.
-function thumbToPick(th, force) {
-  const box = th.parentElement, on = box.querySelector(":scope > .on");
-  if (!on || !on.offsetParent) return;
-  if (!force && parseFloat(th.style.width) === on.offsetWidth) return;
-  th.classList.add("still");
-  placeThumb(th, box, on);
-  th.style.transform = `translateX(${on.offsetLeft}px)`;
-  th.style.width = on.offsetWidth + "px";
-  void th.offsetWidth;
-  th.classList.remove("still");
-}
-// A strip's thumb is normally as tall as the strip, its top and bottom from
-// its own CSS (the nav's 2px, a stream's 1.5px inset), which is right while
-// the options share one row. A strip that wraps — the agent chips and the
-// chart's metrics in a narrow window — puts them on several rows, and a thumb
-// stretched from the strip's top to its foot then covers every row instead of
-// the one picked (a user's 560px window: three rows of chips under one slab).
-// There the thumb takes the picked option's own row, from its offset — an
-// integer, so the fractional insets of a single-row strip keep their own box.
-function stripWraps(box, on) {
-  return [...box.querySelectorAll(":scope > .opt")].some((b) => b.offsetTop !== on.offsetTop);
-}
-function placeThumb(th, box, on) {
-  if (stripWraps(box, on)) { th.style.top = on.offsetTop + "px"; th.style.height = on.offsetHeight + "px"; th.style.bottom = "auto"; }
-  else { th.style.top = ""; th.style.height = ""; th.style.bottom = ""; }
-}
-// A window's width, not the reader, decides whether a strip wraps, and no
-// slide follows a resize: the thumbs that a wrap moved (or that a wider
-// window unwrapped) are put back on their option, still. A strip that never
-// wrapped is left to its own CSS, so a resize costs it nothing. The width
-// arrives in a stream while the window is dragged, so the sweep is coalesced
-// to one a frame.
-let thumbRefit = 0;
-addEventListener("resize", () => {
-  if (thumbRefit) return;
-  thumbRefit = requestAnimationFrame(() => {
-    thumbRefit = 0;
-    fitChartLabels();
-    for (const th of document.querySelectorAll(".thumb")) {
-      const box = th.parentElement, on = box?.querySelector(":scope > .on");
-      if (on && (th.style.top || stripWraps(box, on))) thumbToPick(th, true);
-    }
-  });
-});
 // A tab list's keys: the arrows, Home and End move along its shown tabs,
 // and the tab reached is clicked, so the page is held as for a click
 function tabKeys(tabs, sel) {
@@ -19059,12 +19018,7 @@ async function show(v) {
   $("#prefs").classList.toggle("on", v === "settings");
   for (const id of ["agents", "providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"]) $("#view-" + id).hidden = v !== id;
   // back to where the reader was in it, and again once it has what it loads
-  const back = () => {
-    const page = $("#view-" + v);
-    backToReader(page);
-    // A hidden Usage page could not refit its strips when the window resized.
-    if (v === "usage") for (const th of page.querySelectorAll(".segs > .thumb")) thumbToPick(th, true);
-  };
+  const back = () => backToReader($("#view-" + v));
   requestAnimationFrame(back);
   closePicker();
   closeAgentModels();

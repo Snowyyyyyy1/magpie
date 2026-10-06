@@ -1031,16 +1031,9 @@ details.cx-part[open] > summary .cx-h { margin-bottom: 2px; }
 /* A native window is narrow without being a phone: six figures on a 918px
    page are 152px each and their sub-lines end in an ellipsis, so between the
    desk's six columns and the phone's three the window takes three to a row.
-   The agent chips and the chart's metrics, on a row too narrow for them, wrap
-   inside their own row instead of clipping at the edge and widening the page:
-   macOS hides an overlay scrollbar, so a scroller there still read as chips
-   sliced mid-word. */
+   Agent chips retain their own scrolling strip (#929). */
 @container (min-width: 821px) and (max-width: 1100px) {
   body.window:not(.web) .stats.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
-@container (max-width: 1100px) {
-  body.window:not(.web) .sess-tools > .segs, body.window:not(.web) .sess-chart-head > .segs { max-width: 100%; flex-wrap: wrap; row-gap: 2px; overflow-x: visible; }
-  body.window:not(.web) .sess-tools > .segs .opt, body.window:not(.web) .sess-chart-head > .segs .opt { flex: none; }
 }
 .kpi.stale, .sess-card.stale .sess-tops { opacity: .55; transition: opacity .2s; }
 .l0 { background: var(--pill); }

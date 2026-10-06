@@ -2,8 +2,8 @@
 // The Usage page in a narrow native window (mode=window, as the app opens it):
 // the head takes the rows it needs instead of one 34px line, its controls stay
 // packed at the left (no lone sum floating at the right of a row of its own),
-// the agent chips and the chart's metrics wrap inside their own row rather
-// than clipping at the edge, the six figures go three to a row with their
+// the agent chips keep their scrolling strip and the selected agent in view,
+// the six figures go three to a row with their
 // sub-lines whole, the chart's dates stop colliding, and the page never
 // scrolls sideways. Chromium and WebKit.
 const assert = require("node:assert/strict");
@@ -109,8 +109,7 @@ const look = () => {
     const b = e.getBoundingClientRect();
     return rows.findIndex((r) => b.top < r.bottom - 1 && b.bottom > r.top + 1);
   };
-  // every strip's thumb on the option it is under: a strip that wraps (the
-  // agent chips in a narrow window) must not carry one thumb over every row
+  // Every visible strip's thumb stays on its selected option.
   const thumbs = [...document.querySelectorAll(".segs")].filter((s) => s.offsetParent).map((s) => {
     const on = s.querySelector(":scope > .on"), th = s.querySelector(":scope > .thumb");
     if (!on || !th) return null;
@@ -156,7 +155,7 @@ const look = () => {
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  for (const lang of ["en", "zh"]) {
+  for (const lang of ["en", "zh", "ja", "de"]) {
   test(engine + " " + lang + ": the Usage page keeps its head, chips and figures inside a narrow window", async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const context = await browser.newContext({ viewport: { width: 950, height: 760 }, reducedMotion: "reduce", timezoneId: "Asia/Shanghai" });
@@ -166,7 +165,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     page.on("pageerror", (e) => errors.push(e.message));
     t.after(() => browser.close());
     await page.route("**/*", serve(lang));
-    await page.addInitScript(() => { localStorage.setItem("magpie.usageTab", "sessions"); localStorage.setItem("magpie.sessRange", "30d"); });
+    await page.addInitScript(() => { localStorage.setItem("magpie.usageTab", "sessions"); localStorage.setItem("magpie.sessRange", "30d"); localStorage.setItem("magpie.usageEvery", "0"); });
     await page.goto("http://magpie.test/?view=usage");
     await page.locator("#sessGrid:not([hidden])").waitFor();
     await page.waitForFunction(() => !document.querySelector("#sessStats .kpi.stale") && document.querySelectorAll("#sessStats .kpi").length === 6 &&
@@ -199,13 +198,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // above ending in empty space, is the orphan this guards
       assert.ok(/\d{4,}/.test(m.costText), width + "px: the sum is not the long one the fixture asked for (" + m.costText + ")");
       assert.ok(m.refreshRow >= 0 && m.refreshRow === m.costRow, width + "px: the refresh and the sum are apart (rows " + m.refreshRow + " and " + m.costRow + "): " + JSON.stringify(m.headRows.map((r) => r.items.map((i) => i.id))));
-      // every strip's thumb sits on the option it is under, whether the strip
-      // is one row or (the agent chips here) several
+      // Every strip remains one row, with the thumb on its selected option.
       const offThumb = m.thumbs.filter((s) => Math.abs(s.dTop) > 1 || Math.abs(s.dH) > 1 || Math.abs(s.dLeft) > 1 || Math.abs(s.dW) > 1)
         .map((s) => s.id + "(" + s.on + ", " + s.rows + " rows): top " + s.dTop + " h " + s.dH + " left " + s.dLeft + " w " + s.dW);
       assert.deepEqual(offThumb, [], width + "px: a strip's thumb is not on its option");
-      const wrapped = m.thumbs.find((s) => s.id === "sessAgent");
-      assert.ok(wrapped && wrapped.rows > 1, width + "px: the agent chips are one row, so nothing wraps here");
+      const agents = m.thumbs.find((s) => s.id === "sessAgent");
+      assert.equal(agents.rows, 1, width + "px: the agent strip keeps one row (#929)");
+      assert.equal(m.agent.overflowX, "auto", width + "px: agent overflow stays within its strip");
+      assert(m.agent.scrollW > m.agent.clientW, width + "px: the fixture needs a scrolling agent strip");
       // the chips and the chart's metrics: inside the pane, scrollable to their end
       for (const [what, s] of [["the agent chips", m.agent], ["the chart's metrics", m.metric]]) {
         assert.ok(s.left >= m.view.left - 0.5 && s.right <= m.view.right + 0.5, width + "px: " + what + " stand outside the page: " + JSON.stringify(s));
@@ -226,21 +226,34 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }
     }
 
-    // Select options on every wrapped row, then widen and narrow while
-    // keeping that choice: resizing must remove and restore its vertical box.
+    // Select both ends of the scrolling strip with a real pointer press.
+    // The page's click guard holds the picked control while content redraws.
     await page.setViewportSize({ width: 560, height: 760 });
-    const rowPicks = await page.locator("#sessAgent .opt").evaluateAll((opts) => {
-      const seen = new Set();
-      return opts.flatMap((o, i) => seen.has(o.offsetTop) ? [] : (seen.add(o.offsetTop), [i]));
-    });
-    assert(rowPicks.length > 1, "the interaction fixture has wrapped rows");
-    for (const i of rowPicks) {
-      await page.locator("#sessAgent .opt").nth(i).click();
+    const pressAgent = async (last) => {
+      await page.locator("#sessAgent").evaluate((strip, last) => { strip.scrollLeft = last ? strip.scrollWidth : 0; }, last);
+      await settle();
+      const p = await page.locator("#sessAgent").evaluate((strip, last) => {
+        const options = strip.querySelectorAll(".opt");
+        const option = last ? options[options.length - 1] : options[0];
+        const r = option.getBoundingClientRect();
+        // WebKit's transient scrollbar overlays the lower half after
+        // scrolling. Press the visible button above it, not its track.
+        return { x: r.left + r.width / 2, y: r.top + 3, text: option.textContent };
+      }, last);
+      await page.mouse.click(p.x, p.y);
+      await page.waitForFunction((text) => document.querySelector("#sessAgent .opt.on")?.textContent === text, p.text);
       await settle();
       const check = await page.evaluate(look);
       const th = check.thumbs.find((s) => s.id === "sessAgent");
-      assert(Math.abs(th.dTop) <= 1 && Math.abs(th.dH) <= 1 && Math.abs(th.dLeft) <= 1, "a clicked row is highlighted");
-    }
+      assert(Math.abs(th.dTop) <= 1 && Math.abs(th.dH) <= 1 && Math.abs(th.dLeft) <= 1, "the scrolling strip highlights its choice");
+      const visible = await page.locator("#sessAgent").evaluate((strip) => {
+        const s = strip.getBoundingClientRect(), r = strip.querySelector(":scope > .on").getBoundingClientRect();
+        return r.left >= s.left - 1 && r.right <= s.right + 1;
+      });
+      assert(visible, "the picked agent stays in the strip's visible span");
+    };
+    await pressAgent(true);
+    await pressAgent(false);
     for (const width of [1600, 950, 560]) {
       await page.setViewportSize({ width, height: 760 });
       await settle();
@@ -250,18 +263,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     // Nothing changed in the API while Usage was hidden: a cached response
     // must not leave a highlight measured at the window's former width.
     await page.setViewportSize({ width: 560, height: 760 });
-    await page.locator("#sessAgent .opt").filter({ hasText: /^Kiro$/ }).click();
+    await pressAgent(true);
     await page.evaluate(() => show("agents"));
     await page.setViewportSize({ width: 950, height: 760 });
     await settle();
     await page.evaluate(() => show("usage"));
     await settle();
     const hiddenResize = (await page.evaluate(look)).thumbs.find((s) => s.id === "sessAgent");
-    assert.equal(hiddenResize.on, "Kiro");
+    assert.equal(hiddenResize.on, AGENTS[AGENTS.length - 1][1]);
     assert(Math.abs(hiddenResize.dTop) <= 1 && Math.abs(hiddenResize.dH) <= 1 && Math.abs(hiddenResize.dLeft) <= 1 && Math.abs(hiddenResize.dW) <= 1,
       "the cached page refits after resizing while hidden: " + JSON.stringify(hiddenResize));
 
-    await page.locator("#sessAgent .opt").first().click();
+    await pressAgent(false);
     await settle();
 
     await page.mouse.move(400, 400);

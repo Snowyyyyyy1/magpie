@@ -6,7 +6,7 @@
 // throw the thumb back to the option left behind a few frames in (the jump
 // this guards). The thumb's left edge is sampled every frame across the click:
 // it may only move toward the option picked, and comes to rest on it.
-// English and Chinese, Chromium and WebKit; no backend, the API is faked.
+// English, Chinese, Japanese and German, Chromium and WebKit; no backend, the API is faked.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -106,7 +106,7 @@ async function sampleAcross(p, click, ms) {
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  for (const lang of ["en", "zh"]) {
+  for (const lang of ["en", "zh", "ja", "de"]) {
     test(`${engine} ${lang}: the panel Usage period thumb does not bounce back`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       t.after(() => browser.close());
@@ -147,7 +147,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await p.waitForTimeout(200);
       const rest = await seg.locator(".thumb").evaluate((e) => e.getBoundingClientRect().left);
       assert(Math.abs(rest - target) <= 1.5, "the thumb is still on 7 days");
-      assert.equal((await opts.nth(1).textContent()).trim(), lang === "zh" ? "7 天" : "7 days");
+      assert.equal((await opts.nth(1).textContent()).trim(), ({ en: "7 days", zh: "7 天", ja: "7 日", de: "7 Tage" })[lang]);
 
       // back the other way, too: the same rule, target to the left
       const backSamples = await sampleAcross(p, () => opts.nth(0).click(), 900);

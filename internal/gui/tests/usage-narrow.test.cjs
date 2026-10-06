@@ -242,7 +242,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }, last);
       await page.mouse.click(p.x, p.y);
       await page.waitForFunction((text) => document.querySelector("#sessAgent .opt.on")?.textContent === text, p.text);
-      await settle();
+      // The picked chip's class flips right away, but its thumb glides there
+      // (a .28s transition), and two frames are not always enough to read it
+      // landed: Chromium can still measure the thumb on the chip it left.
+      // Wait for the thumb itself, bounded, so the check below is not read
+      // mid-move. Both rects are read in the same scroll space, so the
+      // strip's own horizontal scroll offset does not matter.
+      await page.waitForFunction(() => {
+        const strip = document.querySelector("#sessAgent");
+        const on = strip && strip.querySelector(":scope > .on"), th = strip && strip.querySelector(":scope > .thumb");
+        if (!on || !th) return false;
+        const ob = on.getBoundingClientRect(), tb = th.getBoundingClientRect();
+        return Math.abs(tb.left - ob.left) <= 1 && Math.abs(tb.top - ob.top) <= 1 && Math.abs(tb.height - ob.height) <= 1;
+      });
       const check = await page.evaluate(look);
       const th = check.thumbs.find((s) => s.id === "sessAgent");
       assert(Math.abs(th.dTop) <= 1 && Math.abs(th.dH) <= 1 && Math.abs(th.dLeft) <= 1, "the scrolling strip highlights its choice");

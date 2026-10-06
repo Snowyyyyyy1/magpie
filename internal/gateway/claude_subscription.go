@@ -133,7 +133,11 @@ type subscriptionRun struct {
 	// the tools its agent was told of, as it started and since
 	tools map[string]bool
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// sending is held across a send to the segment and taken before it is
+	// closed, so a send blocked on a full segment no one reads yet holds
+	// this, not mu: the request's heard, stderr and abort go on meanwhile
+	sending  sync.Mutex
 	segment  chan Event
 	pending  map[string]chan mcpToolResult
 	closed   bool
@@ -1717,9 +1721,11 @@ func (r *subscriptionRun) attach() chan Event {
 }
 
 func (r *subscriptionRun) emit(ev Event) {
+	r.sending.Lock()
+	defer r.sending.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.segment != nil {
+	ch := r.segment
+	if ch != nil {
 		switch ev.Kind {
 		case KStart: // a reply begins
 			r.shown = nil
@@ -1730,8 +1736,19 @@ func (r *subscriptionRun) emit(ev Event) {
 				r.shown[n-1].args += ev.Text
 			}
 		}
-		r.segment <- ev
 	}
+	r.mu.Unlock()
+	if ch != nil {
+		ch <- ev
+	}
+}
+
+// closeSegment closes a segment taken off the run, once no send to it is
+// under way.
+func (r *subscriptionRun) closeSegment(ch chan Event) {
+	r.sending.Lock()
+	close(ch)
+	r.sending.Unlock()
 }
 
 func (r *subscriptionRun) endSegment() {
@@ -1743,7 +1760,7 @@ func (r *subscriptionRun) endSegment() {
 	}
 	r.mu.Unlock()
 	if ch != nil {
-		close(ch)
+		r.closeSegment(ch)
 	}
 }
 
@@ -2796,7 +2813,7 @@ func (r *subscriptionRun) finish() {
 		close(waiter)
 	}
 	if ch != nil {
-		close(ch)
+		r.closeSegment(ch)
 	}
 	if r.bridge != nil { // a run made in a test may have none
 		r.bridge.removeRun(r)

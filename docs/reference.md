@@ -99,6 +99,7 @@ line; agents connected to magpie lose it when it quits.
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
 | DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie, its key `MAGPIE_GATEWAY_KEY` in `~/.dsh/.env` and dsh's own key store `~/.dsh/.credentials.yaml`, which the desktop app reads; on one of magpie's models its `web-search-deepseek` row also goes to the gateway, which searches with the model or Settings › Web search, unless dsh has a `DEEPSEEK_API_KEY` or a row of your own), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
+| Reasonix Studio (2.x, or a native Go `reasonix` 2.x / 1.39.x CLI) | `~/.reasonix/config.toml` + `.env` (`%APPDATA%/reasonix` on Windows; `$REASONIX_HOME`) | model (Executor), planner (Plan), effort (a dedicated `magpie` provider, shared by Studio and the native CLI) |
 | Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
 | fx           | `~/.fx/settings.json`             | model (a keyless `magpie` provider) |
 | omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
@@ -116,6 +117,7 @@ line; agents connected to magpie lose it when it quits.
 | Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
 | ZCode        | `~/.zcode/v2/config.json`         | provider (magpie's models in ZCode's picker) |
 | WorkBuddy    | `~/.workbuddy/models.json` (`$WORKBUDDY_CONFIG_DIR`) | provider (magpie's models in WorkBuddy's picker) |
+| CodeBuddy Code | `~/.codebuddy/models.json` (`$CODEBUDDY_CONFIG_DIR`), `settings.json` | model (magpie's models in its list; the session model) |
 | T3 Code      | `~/.t3/userdata/settings.json` (`$T3CODE_HOME/userdata`) | provider (a `magpie` provider instance on Claude Code, magpie's models as its custom models) |
 | OpenHanako   | `~/.hanako/provider-catalog.json` + `agents/<id>/config.yaml` (`$HANA_HOME`; its local API while it runs) | model (the primary agent's; magpie's models as a provider) |
 | AtomCode     | `~/.atomcode/config.toml` (`$ATOMCODE_HOME`) | model, effort (a `magpie` provider account, one model table per catalog model as its own sign-in writes) |
@@ -287,8 +289,9 @@ before a provider is asked; a fallback it may not use is skipped. A key with
 no models listed may use every model.
 
 A gateway key can also be held to some **accounts** (#905): the accounts
-and keys its requests may use, picked in the same menu after the models —
-an account by who is signed in, a key by its fingerprint — or with
+and keys its requests may use, picked in the same menu right after their
+provider's models — an account by who is signed in, a key by its
+fingerprint — or with
 `magpie gateway-key accounts <id> codex/me@example.com openai/<key id>`
 (`all` takes the restriction off). The list holds a key to some accounts
 **of the providers it names**: a provider it names no account of, the key
@@ -685,6 +688,23 @@ requests only (the live trace or the selected day's retained history), and a
 `+` marks a partial estimate. Calls without a session ID are listed separately;
 old history without token tiers, or a model without a known price, shows `—`.
 
+Opening the Providers page automatically checks Alma, CC Switch, Claude Code
+and Codex for local provider configurations that can be imported. With no
+providers yet, a hint shows how many were found and which apps they came from;
+otherwise a small **Import local configurations** link sits beside **Add
+provider**. Both open the existing picker with only the offered configurations
+selected; nothing is added until you confirm the selection. **Ignore** remembers
+the offered configurations on this device across window restarts; new or changed
+configurations can be offered again. **Add provider → Import…** still includes ignored configurations.
+Discovery runs in the background, at most once a minute when opening or
+refreshing the page, and refreshes after an import. Configurations already in
+magpie, entries that cannot be imported, providers turned off in their source
+app, and ID collisions that cannot join as another key are excluded from the
+hint. The latter two remain available through manual import. Counts refer to
+configurations in source apps, which may include the same provider
+in more than one app. Only app names and opaque configuration fingerprints
+reach the automatic hint; ignored fingerprints are kept in local browser storage.
+
 The app's Import from other apps dialog can copy providers from Claude Code's
 `settings.json` (`CLAUDE_CONFIG_DIR` when set) and Codex's `config.toml`
 (`CODEX_HOME` when set) into magpie. Codex imports custom
@@ -766,7 +786,7 @@ It exposes:
 | Path                     | API                        |
 | ------------------------ | -------------------------- |
 | `/v1/chat/completions`   | OpenAI chat completions    |
-| `/v1/responses`          | OpenAI Responses           |
+| `/v1/responses`          | OpenAI Responses (HTTP, streamed as SSE; a WebSocket upgrade is answered 426) |
 | `/v1/messages`           | Anthropic Messages         |
 | `/v1/messages/count_tokens` | Anthropic token counting |
 | `/v1beta/models/{model}:generateContent` | Google Gemini (also `:streamGenerateContent`, `:countTokens`) |
@@ -839,11 +859,12 @@ unknown name exits 2 and Ctrl+C 130.
 A ChatGPT account that holds credits keeps answering once a usage window is
 used up: the vendor spends the credits, so a task goes on. That is the
 default. `magpie quota credits <account> off` (or *Use credits* on the
-account's Usage card) turns it off for that account: the gateway then holds
-it as used up till the window renews, and requests go to the other
-accounts, groups and fallbacks; with none left, the request gets a 429
-saying why, unless the account spends its resets by itself and its week is
-used up, when a reset is spent first. `magpie quota credits` lists the
+account's Usage card) turns it off for that account: once magpie's latest
+reading of its windows, refreshed about every minute, shows one used up,
+the gateway holds it as used up till the window renews, and requests go to
+the other accounts, groups and fallbacks; with none left, the request gets a
+429 saying why, unless the account spends its resets by itself and its week
+is used up, when a reset is spent first. `magpie quota credits` lists the
 accounts set not to spend them, `magpie quota credits <account>` says one's.
 It changes the gateway's routing only, never the account Codex is signed in
 to. The credits an account holds show beside its windows in `magpie quota`,
@@ -865,7 +886,15 @@ native model or disconnecting removes `model_provider` and the catalog. The
 still be opened. Codex won't load its config at all when `model_provider =
 "magpie"` has no table ("Model provider `magpie` not found"). If another
 tool leaves that state behind, magpie writes the table back the next time
-it syncs. Your ChatGPT sign-in is never touched.
+it syncs. Signed in to ChatGPT (the sign-in field's default), Codex keeps
+its own provider and sign-in, and magpie's models join its list through
+`openai_base_url`. magpie becomes Codex's provider then only while the
+Codex app holds the account: OpenAI no longer allows it and it has no
+credits left, except a workspace account still within its overage. The
+app sends nothing for a held account, so magpie steps in, and it steps
+back once the account has room again. A window at 100% with credits left
+doesn't count: Codex stays signed in and keeps sending on those. Your
+ChatGPT sign-in is never touched.
 Codex reads its model list at start-up, so restart it after a switch.
 
 **OpenCode, Pi, Crush** get a `magpie` provider entry and `magpie/provider/model`.
@@ -1134,7 +1163,7 @@ magpie sync                     # refresh the models.dev catalog and every live 
 
 magpie quota                    # what is left of every subscription, plan and key balance
 magpie quota wait codex         # block until a Codex account has allowance again
-magpie quota credits me@example.com off   # hold a ChatGPT account at its limit, not spending credits
+magpie quota credits me@example.com off   # hold a ChatGPT account at its limit instead of spending credits
 ```
 
 In the app, click any value to open a filtered list; type to search or to

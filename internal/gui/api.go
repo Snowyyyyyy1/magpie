@@ -952,7 +952,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// arranged is the Agents page's, and the window's size its own; both stay as they are
 		cur := settings.Load()
 		in.AgentOrder, in.AgentsHidden, in.AgentsShown = cur.AgentOrder, cur.AgentsHidden, cur.AgentsShown
-		in.Window = cur.Window // the window's own, as it was last resized
+		in.Window, in.WindowMaximised = cur.Window, cur.WindowMaximised // the window's own, as it was last resized
 		// and what other pages keep here: which models an agent is shown, and
 		// everything the user said of a model anywhere else in the app, set on
 		// its own. The per-model maps are carried whole rather than named one
@@ -962,7 +962,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// agent, not by "<provider>/<model>" — so they are not among them,
 		// and belong to the Agents page.
 		in.Visible, in.HiddenModels, in.OrderedModels = cur.Visible, cur.HiddenModels, cur.OrderedModels
-		in.FastPicks = cur.FastPicks // switched in the agents' pickers (#954)
+		in.FastPicks = cur.FastPicks       // switched in the agents' pickers (#954)
+		in.AgentEfforts = cur.AgentEfforts // picked in an agent's row (#1003)
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID

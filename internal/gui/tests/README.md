@@ -2002,3 +2002,25 @@ node --test internal/gui/tests/library-rtk-nohook.test.cjs
 `usage-narrow.test.cjs` checks the native Usage window at 950, 760 and 560px: controls and long sums stay together, session agents scroll within their strip, their selection and highlight survive resizing and redraws, KPI details remain whole, and chart dates stay apart.
 
 `panel-usage-period.test.cjs` samples the period highlight across response-driven redraws and rapid picks. It must not jump back before reaching the selected option, and a response arriving while a period is pressed must preserve that click. Both engines and English, Chinese, Japanese and German are covered.
+
+## Local Provider Discovery
+
+`provider-discovery.test.cjs` checks the automatic Providers-page hint on
+Chromium and WebKit: discovery runs without blocking the list or resetting an
+Add-sheet search, details are read only when the picker opens, and only selected
+entries are imported. It covers refresh after partial and complete imports,
+late scan responses, a prominent first-use hint and a compact entry beside Add
+provider for existing users, a later visit finding new configurations,
+persistent dismissal across reloads and partial imports, newly added or changed
+configurations without selecting previously ignored entries, manual import of
+ignored entries, a scan containing only an ID collision or a disabled Alma
+provider (no hint, but both remain selectable in manual import), an empty scan,
+a failed scan, and a narrow window. The main flow runs in English and
+Chinese; all credentials and API responses are fixtures. Run with
+`node --test internal/gui/tests/provider-discovery.test.cjs` and the Playwright
+environment described in this file. `TestLocalProviderDiscovery` exercises the real
+readers and summary endpoint in an isolated home, including duplicate and
+unimportable entries, unreadable sources, stable fingerprints despite ID
+collisions, changed configuration fingerprints, excluding unticked collision and
+disabled Alma entries while preserving the add-key case, and keeping credentials
+server-side.

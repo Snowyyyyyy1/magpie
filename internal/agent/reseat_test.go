@@ -28,6 +28,35 @@ func reseatHome(t *testing.T) string {
 	return home
 }
 
+// A group Claude Code is on carries its [1m] mark in the agent's own
+// settings, as a model's does. sameModel reads that ref back when the
+// group's model is down to one provider and the agent has to be moved to
+// the same model elsewhere, so the mark has to come off there too: leaving
+// it on compares "auto-gpt-5[1m]" with "auto-gpt-5" and finds nothing,
+// and an agent whose group is gone is left on it.
+func TestSameModelTakesTheOneMMarkOffAGroupRef(t *testing.T) {
+	reseatHome(t)
+	for _, p := range []provider.Provider{
+		{ID: "other", Name: "Other", Chat: "https://other.example/v1", Key: "k", Models: []string{"gpt-5"}},
+	} {
+		if err := provider.Save(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := []Option{{Value: "magpie/group/auto-gpt-5", Ref: "group/auto-gpt-5"}, {Value: "other/gpt-5", Ref: "other/gpt-5"}}
+	if got := sameModel(opts, "group/auto-gpt-5[1m]"); got.Ref != "other/gpt-5" {
+		t.Errorf("[1m] on the group: %+v", got)
+	}
+	if got := sameModel(opts, "group/auto-gpt-5"); got.Ref != "other/gpt-5" {
+		t.Errorf("the bare group: %+v", got)
+	}
+	// a group that is nobody else's still gives nothing (nothing to move to)
+	none := []Option{{Value: "magpie/group/mine", Ref: "group/mine"}, {Value: "other/gpt-5", Ref: "other/gpt-5"}}
+	if got := sameModel(none, "group/mine[1m]"); got.Ref != "" {
+		t.Errorf("a group of the user's own: %+v", got)
+	}
+}
+
 func mustFind(t *testing.T, id string) *Agent {
 	t.Helper()
 	a, err := Find(id)

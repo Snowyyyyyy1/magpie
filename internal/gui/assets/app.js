@@ -39,6 +39,10 @@ let naming = null; // the provider whose models' names and levels are open in it
 let adding = false; // the preset sheet is open
 let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
 let importingApps = null; // the Import from other apps dialog: { sources, picks }
+let providerDiscovery = []; // only opaque fingerprints and app names, never credentials
+let discoveryAt = 0, discoveryRun = 0, discoveryPending = false;
+let discoveryIgnored = new Set();
+try { discoveryIgnored = new Set(JSON.parse(localStorage.getItem("magpie.discoveryIgnored") || "[]")); } catch {}
 // the gateway tab's choices, kept per machine
 let flavor = params.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak
 let lang = params.get("lang") || localStorage.getItem("magpie.lang") || "shell";        // which snippet
@@ -266,7 +270,7 @@ function renderAgents() {
     // the model picker takes the wide column, everything else the narrow one,
     // so the controls line up down the list
     const fields = el("div", "fields");
-    const wide = (f) => f.label === "model" || f.label === "large";
+    const wide = (f) => f.label === "model" || f.label === "large" || f.label === "executor" || f.label === "planner";
     // an effort or ultracode the model has none of (Claude Code on Haiku
     // 4.5, ultracode short of xhigh) isn't drawn at all, nor are subagents
     // with no model to go on (Claude Code's, until it runs through magpie)
@@ -291,6 +295,7 @@ function renderAgents() {
       else if (effort) b.append(effortIcon(f));
       else if (!f.value && !f.menu && a.icon) b.append(icon(a.icon));
       else if (!wide(f) || !f.value) b.append(el("span", "k", t(f.label)));
+      if ((f.label === "executor" || f.label === "planner") && !b.querySelector(".k")) b.append(el("span", "k", t(f.label)));
       const shown = f.menu ? f.summary : effort ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t(FOLLOWS_MODEL.includes(f.label) ? "same as model" : "default"));
       if (f.menu) b.title = f.options.map((o) => `${o.label}: ${o.note}`).join("\n");
       b.append(el("span", "v" + (f.value || f.custom ? "" : " empty"), shown));
@@ -1292,7 +1297,10 @@ function connectPanel(a, { fields, fieldBtn }) {
       const f = a.fields.find((x) => x.key === b.dataset.key);
       if (f && !b.querySelector(":scope > .k")) b.prepend(el("span", "k", t(f.label)));
     }
-    kv(t("New sessions"), line(fields));
+    // Cursor Private Inference's are magpie's own, its effort asked on
+    // every request it sends from then on, not what a new session starts
+    // with (#1003)
+    kv(t(a.id === "cursor-local" ? "Settings" : "New sessions"), line(fields));
   }
   if (a.native) for (const [key, detail] of Object.entries(a.native.fields || {})) {
     if (detail.detail) { const f = a.fields.find((x) => x.key === key); kv(t(f?.label || key), line(t(detail.detail))); }
@@ -3439,9 +3447,10 @@ function openPicker(agent, field, anchor, ev, only) {
     // provider signed in, in its own order, so Default is no fixed model
     // and a model picked in Pi's /model lasts the session only unless
     // saved there with Ctrl+S (#709)
-    const note = PICKS_ITSELF.includes(agent.id) && field.key === "model" ? "clears the default model; {agent} picks one on its own"
+    const note = agent.id === "reasonix" && ["model", "planner"].includes(field.key) ? "restore the previous {field} selection"
+      : PICKS_ITSELF.includes(agent.id) && field.key === "model" ? "clears the default model; {agent} picks one on its own"
       : field.label === MEMORIES ? MEMORIES_DEFAULT : "what {agent} ships with";
-    options.unshift({ value: "", label: t("Default"), note: t(note, { agent: agent.name }), icon: agent.icon, reset: true });
+    options.unshift({ value: "", label: t("Default"), note: t(note, { agent: agent.name, field: t(field.label) }), icon: agent.icon, reset: true });
   }
   // Default is the agent as installed; this is the agent as it was before
   // magpie, beside it so the two aren't taken for each other
@@ -3449,7 +3458,7 @@ function openPicker(agent, field, anchor, ev, only) {
     const at = options.findIndex((o) => !o.reset);
     options.splice(at < 0 ? options.length : at, 0, { value: "\0disconnect", label: t("Disconnect from magpie"), note: t("put back what {agent} had before magpie", { agent: agent.name }), svg: UNPLUG, reset: true, run: () => askDisconnect(agent) });
   }
-  const modelPicker = ["model", "small", "large", MEMORIES, ...FOLLOWS_MODEL].includes(field.label) && !only;
+  const modelPicker = ["model", "small", "large", MEMORIES, "executor", "planner", ...FOLLOWS_MODEL].includes(field.label) && !only;
   pick = { agent, field, options, anchor, cursor: 0, free: !only && !field.menu, modelPicker, effortPicker, groupFilter: "all" };
   anchor.classList.add("open");
   const pop = $("#pop");
@@ -3701,7 +3710,7 @@ function filter(keep) {
   if (q) scored.sort((a, b) => b.s - a.s || a.i - b.i);
   pick.items = scored.map((x) => x.o);
   const typed = $("#q").value.trim();
-  if (typed && pick.free && ["model", "small", "large", ...FOLLOWS_MODEL].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
+  if (typed && pick.free && ["model", "small", "large", "executor", "planner", ...FOLLOWS_MODEL].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
     pick.items.push({ value: typed, note: t("use as typed"), custom: true });
   }
   pick.items = foldSame(pick.items);
@@ -4098,7 +4107,12 @@ async function commit(value) {
 // directly (Claude Code's own, which unroutes it). From one of its own
 // models already, the pick doesn't move it off magpie.
 function leavesMagpie(a, field, value, opt) {
-  if (a?.native || !a?.wired || !connectable(a) || field !== (startField(a) || connectField(a))) return false;
+  if (a?.native || !a?.wired || !connectable(a)) return false;
+  // Reasonix restores each role separately; either role can keep its provider.
+  if (a.id === "reasonix" && value === "") {
+    return !!optionFor(field, field.value)?.ref && !a.fields.some((f) => f !== field && optionFor(f, f.value)?.ref);
+  }
+  if (field !== (startField(a) || connectField(a))) return false;
   if (optionFor(field, field.value)?.direct) return false;
   return value === "" || !!opt?.direct;
 }
@@ -4112,7 +4126,9 @@ function askLeave(a, field, value, opt) {
   const head = el("div", "ehead");
   head.append(icon(a.icon), el("b", "", t("Take {agent} off magpie?", { agent: a.name })));
   ed.append(head);
-  ed.append(el("p", "lib-confirm", value === ""
+  ed.append(el("p", "lib-confirm", value === "" && a.id === "reasonix"
+    ? t("Restores {agent}'s previous {field} selection. Magpie's provider and private credential are removed when neither executor nor planner uses them.", { agent: a.name, field: t(field.label) })
+    : value === ""
     ? t("Default is {agent} as installed: magpie's endpoint and models come out, and {agent} starts on its own default model. What it had before magpie isn't put back; Disconnect and restore does that.", { agent: a.name })
     : t("{model} is {agent}'s own model: {agent} asks {vendor} for it itself, with its own sign-in, not through magpie. Picking it takes {agent} off magpie, and it starts on {model}.", { agent: a.name, model, vendor: opt.direct })));
   const others = state.agents.some((x) => x.id !== a.id && onMagpie(x) && !isHidden(x));
@@ -4187,7 +4203,7 @@ async function setPick(agent, field, value, opt) {
     flash();
     const shown = opt?.label || value;
     if (state.notice) status(`${agent.name} → ${shown}. ${t(state.notice)}`, "warn", 9000);
-    else if (leaving && value === "") status(t("{agent} no longer goes through magpie · on its own default", { agent: agent.name }), "ok", 6000);
+    else if (leaving && value === "") status(t(agent.id === "reasonix" ? "{agent} no longer goes through magpie; its own settings are back" : "{agent} no longer goes through magpie · on its own default", { agent: agent.name }), "ok", 6000);
     else if (opt?.direct) status(`${agent.name} ${t(field.label)} → ${shown} · ${t("straight to {vendor}, not through magpie", { vendor: opt.direct })}`, "ok", 6000);
     else status(`${agent.name} ${t(field.label)} → ${shown}`, "ok");
     if (providers) loadProviders();
@@ -4379,6 +4395,7 @@ async function loadProviders() {
   renderArchive();
   providersWhileFetching();
   if (view === "providers") loadUpstream();
+  discoverLocalProviders();
 }
 
 // Accounts' lists still on their way from their vendors (#541: the page no
@@ -4590,6 +4607,7 @@ function renderProviders() {
   renderExcluded();
   renderFileError();
   renderMovable();
+  renderProviderDiscovery();
   dialog = renderAdd() || dialog;
   if (importing) dialog = renderImport(importing);
   if (importingApps) dialog = renderImportApps(importingApps);
@@ -7548,7 +7566,7 @@ function drawEditor(p, presetID) {
       const priceRate = priceRateOfDraft();
       if (priceRate === undefined) return priceRateError(ed);
       if (priceTypedError(ed)) return;
-      saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: chosenIds(), unlisted: draft.unlisted, fallback: draft.fallback, contexts: cx.map, outputs: ox.map, compacts: cpx.map, proxy, accountProxies: own.map, maxConcurrency, ...queue, priceRate, modelPrefs: modelPrefsOfDraft(), pinUpstream: !!draft.pinUpstream, ...routingOfDraft(p) }, t("{name} saved", { name: p.name })); };
+      saving(saveBtn, t("Saving…")); providerAction("save", { id: p.id, models: chosenIds(), unlisted: draft.unlisted, fallback: draft.fallback, contexts: cx.map, outputs: ox.map, compacts: cpx.map, proxy, accountProxies: own.map, maxConcurrency, ...queue, priceRate, modelPrefs: modelPrefsOfDraft(), pinUpstream: !!draft.pinUpstream, ...routingOfDraft(p) }, t("{name} saved", { name: p.name })); };
     bar.append(cancel, saveBtn);
     ed.append(bar);
     return ed;
@@ -7923,7 +7941,7 @@ function drawEditor(p, presetID) {
     if (isNew && custom && !body.chat && !body.anthropic && !body.responses && !body.decide) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
     if (endpoint && !body.chat && !body.responses) { endpoint.focus(); return editorError(t(pr.endpointNeeded || "Your resource's endpoint is needed"), "warn"); }
     editorError("");
-    saveBtn.classList.add("busy");
+    saving(saveBtn, t(isNew ? "Adding…" : "Saving…"));
     providerAction("save", body, t(isNew ? "{name} added" : "{name} saved", { name: draft.name || draft.id }));
   };
   saveBtn.onclick = save;
@@ -8086,13 +8104,66 @@ function fetchImportIcon(p, head, ed) {
   }).catch(() => note.remove());
 }
 
-// renderImport: what a magpie://import link would add, for the user to
-// check. Nothing is saved until they press Add; the key stays hidden unless
-// they ask to see it.
-// Providers other apps (CC Switch, Alma) have set up, for the user to pick
-// from. magpie only reads those apps; the keys stay on the server side and
-// the dialog sees them masked.
-async function openImportApps() {
+// Scan off the page's loading path, at most once a minute as it is opened
+// or refreshed. A completed import forces a fresh scan; an older response
+// cannot put the pre-import hint back. Ignored configurations stay quiet
+// across launches; new or changed ones can still be offered.
+async function discoverLocalProviders(force = false) {
+  if (mode !== "window" || view !== "providers" || providers?.fileError) return;
+  if (!force && (discoveryPending || Date.now() - discoveryAt < 60000)) return;
+  const run = ++discoveryRun;
+  discoveryPending = true;
+  try {
+    const result = await api("importapps/discovery");
+    if (run !== discoveryRun) return;
+    providerDiscovery = Array.isArray(result) ? result : [];
+  } catch {
+    if (run !== discoveryRun) return;
+    providerDiscovery = []; // optional discovery must not block adding by hand
+  } finally {
+    if (run === discoveryRun) {
+      discoveryPending = false;
+      discoveryAt = Date.now();
+      renderProviderDiscovery();
+    }
+  }
+}
+
+function renderProviderDiscovery() {
+  const hint = $("#providerDiscovery");
+  const fresh = providerDiscovery.filter((c) => !discoveryIgnored.has(c.fingerprint));
+  const count = fresh.length, compact = !!providers?.providers.length;
+  hint.hidden = !count || !!providers?.fileError;
+  if (hint.hidden) return;
+  hint.classList.toggle("compact", compact);
+  const parent = compact ? $("#addProvider").parentElement : $("#view-providers");
+  if (hint.parentElement !== parent) parent.insertBefore(hint, compact ? null : $("#providers"));
+  $("#providerDiscoveryCount").textContent = t(count === 1 ? "Found 1 local provider configuration" : "Found {n} local provider configurations", { n: count });
+  const sources = [...new Set(fresh.map((c) => c.source))].join(" · ");
+  $("#providerDiscoverySources").textContent = sources;
+  const review = $("#reviewProviderDiscovery");
+  review.textContent = compact ? t("Import local configurations ({n})…", { n: count }) : t("Review and import…");
+  review.classList.toggle("primary", !compact);
+  review.title = sources;
+}
+$("#reviewProviderDiscovery").onclick = () => openImportApps(new Set(providerDiscovery.filter((c) => !discoveryIgnored.has(c.fingerprint)).map((c) => c.fingerprint)));
+$("#dismissProviderDiscovery").onclick = () => {
+  // Merge other windows' choices before saving, without forgetting candidates
+  // that happen to be unavailable or already imported during this scan.
+  try { for (const id of JSON.parse(localStorage.getItem("magpie.discoveryIgnored") || "[]")) discoveryIgnored.add(id); } catch {}
+  for (const c of providerDiscovery) discoveryIgnored.add(c.fingerprint);
+  try { localStorage.setItem("magpie.discoveryIgnored", JSON.stringify([...discoveryIgnored])); } catch {}
+  renderProviderDiscovery();
+};
+window.addEventListener("storage", (e) => {
+  if (e.key !== "magpie.discoveryIgnored" && e.key !== null) return;
+  try { discoveryIgnored = new Set(JSON.parse(e.newValue || "[]")); } catch { return; }
+  renderProviderDiscovery();
+});
+
+// Providers other apps have set up, for the user to pick from. magpie only
+// reads those apps; the keys stay on the server side and the dialog sees them masked.
+async function openImportApps(discovered) {
   importingApps = { loading: true, sources: [], picks: {} };
   renderProviders();
   try {
@@ -8100,10 +8171,12 @@ async function openImportApps() {
     const picks = {};
     for (const s of sources) for (const it of s.items) {
       if (it.skip || it.status === "same") continue;
-      picks[s.id + "\n" + it.ref] = { on: !it.off && (it.status !== "taken" || !!it.keyOf), mode: it.keyOf ? "key" : "add" };
+      const offered = !(discovered instanceof Set) || discovered.has(it.fingerprint);
+      picks[s.id + "\n" + it.ref] = { on: offered && !it.off && (it.status !== "taken" || !!it.keyOf), mode: it.keyOf ? "key" : "add" };
     }
     if (!importingApps) return;
-    importingApps = { sources, picks };
+    const tab = sources.find((s) => s.items.some((it) => picks[s.id + "\n" + it.ref]?.on))?.id;
+    importingApps = { sources, picks, tab };
   } catch (e) {
     if (!importingApps) return;
     importingApps = { error: e.message, sources: [], picks: {} };
@@ -8228,7 +8301,12 @@ function renderImportApps(ia) {
       adding = false;
       editing = null;
       draft = null;
+      providerDiscovery = [];
+      discoveryAt = 0;
+      discoveryRun++;
+      discoveryPending = false;
       renderProviders();
+      discoverLocalProviders(true);
       state = await api("state");
       renderAgents();
       status(t("Imported {n}: {names}", { n: r.added.length, names: r.added.join(", ") }), "ok");
@@ -8287,6 +8365,9 @@ function importAppRow(ia, s, it, recount, boxes) {
   return row;
 }
 
+// renderImport: what a magpie://import link would add, for the user to
+// check. Nothing is saved until they press Add; the key stays hidden unless
+// they ask to see it.
 function renderImport(im) {
   const ed = el("div", "editor new import");
   ed.onclick = (e) => e.stopPropagation();
@@ -8346,7 +8427,7 @@ function renderImport(im) {
   const add = () => {
     const n = (im.name ?? p.name).trim();
     if (!n) { name.focus(); return status(t("Give it a name"), "warn"); }
-    addBtn.classList.add("busy");
+    saving(addBtn, t(im.replaces ? "Replacing…" : "Adding…"));
     providerAction("save", { ...p, name: n, key: (im.key ?? p.key ?? "").trim() }, t("{name} added", { name: n }));
   };
   addBtn.onclick = add;
@@ -11845,8 +11926,25 @@ async function providerAction(action, body, okMsg, base = "provider/") {
       } catch { /* the error below says enough */ }
     }
     if (!editorError(e.message, "err")) status(e.message, "err");
-    document.querySelector(".editor .busy")?.classList.remove("busy");
+    for (const b of document.querySelectorAll(".editor .busy")) doneSaving(b);
   }
+}
+
+// saving shows a button's save under way, a spinner and what it is doing in
+// place of its label (zola_xynb on X: Save asks the provider for its model
+// list, which can take seconds, and a button only faded looked as if the
+// click had done nothing); doneSaving puts the label back.
+function saving(b, text) {
+  b.dataset.label = b.textContent;
+  b.classList.add("busy", "saving");
+  b.setAttribute("aria-busy", "true");
+  b.replaceChildren(svg(CLI_SPIN, 11, 1.8), el("span", "", text));
+}
+
+function doneSaving(b) {
+  b.classList.remove("busy", "saving");
+  b.removeAttribute("aria-busy");
+  if (b.dataset.label !== undefined) { b.textContent = b.dataset.label; delete b.dataset.label; }
 }
 
 // saidMoved says what was done, and which agents it moved off models it
@@ -13598,7 +13696,7 @@ function creditsRow(q, cls) {
 }
 function creditsTitle(on) {
   return t(on ? "On: once one of this account's windows is used up, ChatGPT answers on the account's credits, if it holds any, so a task goes on. Click to turn it off."
-    : "Off: once one of this account's windows is used up, magpie holds it till the window renews, and requests go to your other accounts, groups and fallbacks, so its credits aren't spent. With none of them left, a request is refused with why, unless Auto-use resets is on and its week is used up: then a reset is used first.");
+    : "Off: once one of this account's windows is used up, by magpie's latest reading (refreshed about every minute), magpie holds it till the window renews, and requests go to your other accounts, groups and fallbacks rather than spending its credits. With none of them left, a request is refused with why, unless Auto-use resets is on and its week is used up: then a reset is used first.");
 }
 
 // creditsButton turns that on or off: a switch, its words beside it.
@@ -16983,8 +17081,16 @@ function renderSettings() {
   $("#lightweightRow").hidden = web;
   $("#lightweightSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.lightweight ? "on" : "off",
     (v) => savePrefs({ ...keep, lightweight: v === "on" })));
-  $("#keepAwakeSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.keepAwake ? "on" : "off",
-    (v) => savePrefs({ ...keep, keepAwake: v === "on" })));
+  // the display kept on too (#975): an agent recording the screen found it locked
+  $("#keepAwakeSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")], ["display", t("Screen on too")]],
+    !s.keepAwake ? "off" : s.keepAwakeDisplay ? "display" : "on",
+    (v) => savePrefs({ ...keep, keepAwake: v !== "off", keepAwakeDisplay: v === "display" })));
+  // its line says what the choice does; data-en keeps a language change on it
+  const awakeSub = $("#keepAwakeRow .sub");
+  awakeSub.dataset.en = s.keepAwake && s.keepAwakeDisplay
+    ? "Keeps this computer from going to sleep and its display on while agents work through magpie and for ten minutes after"
+    : "Keeps this computer from going to sleep by itself while agents work through magpie and for ten minutes after; the display may still turn off";
+  awakeSub.textContent = t(awakeSub.dataset.en);
   renderSessionTerminal(s, keep);
   renderBarIcon();
   // the system's record, set on its own, not with the other choices
@@ -18688,7 +18794,7 @@ function wbCheckinLine(r) {
 
 // prefsKeep is what the settings page sends of s, all of it each time.
 function prefsKeep(s) {
-  return { theme: s.theme, lang: s.lang, tray: s.tray, dock: !!s.dock, dockWindow: !!s.dockWindow, lightweight: !!s.lightweight, keepAwake: !!s.keepAwake, proxy: s.proxy || "",
+  return { theme: s.theme, lang: s.lang, tray: s.tray, dock: !!s.dock, dockWindow: !!s.dockWindow, lightweight: !!s.lightweight, keepAwake: !!s.keepAwake, keepAwakeDisplay: !!s.keepAwakeDisplay, proxy: s.proxy || "",
     sessionTerminal: s.sessionTerminal || "",
     otel: s.otel || {},
     trayUsages: s.trayUsages || [],

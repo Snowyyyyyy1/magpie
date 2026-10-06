@@ -223,6 +223,10 @@ type Settings struct {
 	// agents work through the gateway and for a while after (xiao_wang24004
 	// on X; internal/awake). This computer's own (KeepOwn).
 	KeepAwake bool `json:"keepAwake,omitempty"`
+	// KeepAwakeDisplay keeps the display on too while KeepAwake holds the
+	// computer awake (#975, Hu9956: an agent recording the screen to check
+	// its work found it locked). This computer's own (KeepOwn).
+	KeepAwakeDisplay bool `json:"keepAwakeDisplay,omitempty"`
 	// GatewayMode is whether `magpie web` shows only what a gateway serving
 	// other machines needs (Player on Discord): "on", "off", or "" to
 	// decide by itself — on for `magpie web --gateway`, or with no agents
@@ -318,6 +322,11 @@ type Settings struct {
 	// or a group's) taken out of an agent's lists one by one, by agent id,
 	// after Visible: a model not named here, a new one among them, is shown.
 	HiddenModels map[string][]string `json:"hiddenModels,omitempty"`
+	// AgentEfforts are the reasoning efforts the gateway asks for on an
+	// agent's requests, by agent id, for an agent whose own config can't
+	// carry one (Cursor Private Inference, #1003): one of the levels in
+	// provider.MemberEfforts.
+	AgentEfforts map[string]string `json:"agentEfforts,omitempty"`
 	// OrderedModels is the order an agent's lists put its models in, by
 	// agent id and then entry id, as the user dragged them on the Agents
 	// page (Codex's, #855): the ones named first, any other after them.
@@ -393,9 +402,15 @@ type Settings struct {
 	// than by its own id, for an id no rule of magpie's matches up
 	// (kyzhouxu, #583). Absent leaves it to its id.
 	ModelSameAs map[string]string `json:"modelSameAs,omitempty"`
-	// The main window's size when it was last resized, width and height,
-	// so it opens at it again after a restart.
+	// The main window's size as it last settled, width and height, so it
+	// opens at it again after a restart: the size it is restored to, kept as
+	// it was while it is maximised, and a side fitted to a smaller screen
+	// keeps the larger one (gui's settle).
 	Window []int `json:"window,omitempty"`
+	// WindowMaximised: the main window was maximised (zoomed, on the Mac)
+	// when it last settled, so it opens maximised again; Window is still the
+	// size it is restored to.
+	WindowMaximised bool `json:"windowMaximised,omitempty"`
 }
 
 // ModelPrice is the price of one model as the user states it. Each part is a
@@ -667,13 +682,13 @@ func (s Settings) Compact() int {
 }
 
 // KeepOwn puts back cur's settings that are this computer's own, which a
-// sync or a restored backup never brings from another: the window's size,
-// the proxy, the gateway's port, the Dock, gateway mode, and what the menu bar or tray shows beside magpie's
+// sync or a restored backup never brings from another: the window's size
+// and whether it was maximised, the proxy, the gateway's port, the Dock, gateway mode, and what the menu bar or tray shows beside magpie's
 // icon (yoooo on Discord: usage turned off on a Mac came back from a
 // Windows box that shows it).
 func (s *Settings) KeepOwn(cur Settings) {
 	s.Window, s.Proxy, s.Port, s.Dock, s.DockWindow, s.Lightweight = cur.Window, cur.Proxy, cur.Port, cur.Dock, cur.DockWindow, cur.Lightweight
-	s.KeepAwake = cur.KeepAwake
+	s.WindowMaximised, s.KeepAwake, s.KeepAwakeDisplay = cur.WindowMaximised, cur.KeepAwake, cur.KeepAwakeDisplay
 	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird
 	s.GatewayMode = cur.GatewayMode
 }

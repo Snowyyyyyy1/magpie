@@ -114,6 +114,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		HiddenModels:        map[string][]string{"claude": {"p/m"}, "codex": {"p/n", "group/g"}},
 		OrderedModels:       map[string][]string{"codex": {"group/g", "p/n"}},
 		FastPicks:           map[string][]string{"codex": {"p/n"}},
+		AgentEfforts:        map[string]string{"cursor-local": "high"},
 		ModelNames:          map[string]string{"p/m": "Mine"},
 		ModelEfforts:        map[string][]string{"p/m": {"low"}},
 		ModelImages:         map[string]bool{"p/m": true},
@@ -147,6 +148,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		UpdateSkip:          "0.1.500",
 		UpdateMirror:        "https://mirror.example/",
 		Window:              []int{900, 700},
+		WindowMaximised:     true,
 		FullContext:         true,
 		GatewayMode:         "off",
 	}

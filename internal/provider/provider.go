@@ -1028,6 +1028,38 @@ func (p Provider) ResponsesFirst(model string) bool {
 	return openAIModel(model)
 }
 
+// MessagesFirst: a Claude model where the provider has Anthropic's Messages
+// API, which is best asked there though its Chat or Responses API serves
+// it too — a relay that serves both drops cache_control on Chat, so every
+// turn was billed uncached (#997; ReturnTrue on Discord: 0% cache hits
+// until the relay's OpenAI URL was left empty), and thinking with it.
+func (p Provider) MessagesFirst(model string) bool {
+	return p.Anthropic != "" && claudeModel(model)
+}
+
+// OnMessages: a Claude model MessagesFirst asks on Messages whatever API
+// the client spoke, not only when the client's isn't served — unless the
+// user set the API it is asked on, or the vendor's list names the APIs it
+// serves it on (Copilot's Claude on Chat and Messages), where a request is
+// relayed on the client's own API as before.
+func (p Provider) OnMessages(model string) bool {
+	if !p.MessagesFirst(model) {
+		return false
+	}
+	if _, ok := p.ModelAPI(model); ok {
+		return false
+	}
+	return p.ListedAPIs(model) == nil
+}
+
+// claudeModel is whether model is one of Anthropic's Claude models by its
+// name, after any vendor prefix (anthropic/claude-sonnet-4.5) or as
+// Bedrock names it.
+func claudeModel(model string) bool {
+	m := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
+	return strings.HasPrefix(m, "claude") || bedrockClaude(m)
+}
+
 // openAIModel is whether model is one of OpenAI's own by its name: a GPT,
 // a Codex or an o-series model, after any vendor prefix.
 func openAIModel(model string) bool {
@@ -1039,7 +1071,8 @@ func openAIModel(model string) bool {
 // Native is the API model is best asked on at this provider: one it serves
 // the model on itself, so a request on it is relayed as it is rather than
 // translated — Responses for a ChatGPT sign-in, or an OpenAI model on
-// OpenAI's API or Copilot's; Chat where that is served. "" when every
+// OpenAI's API or Copilot's; Anthropic's Messages for a Claude model
+// where that is served; Chat where that is served. "" when every
 // request is translated anyway: a sign-in served through its agent's own
 // API (Claude Code's binary, Cursor, Devin, Kiro, Code Assist).
 func (p Provider) Native(model string) Protocol {
@@ -1061,6 +1094,9 @@ func (p Provider) Native(model string) Protocol {
 	}
 	if p.ResponsesFirst(model) && slices.Contains(out, Responses) {
 		return Responses
+	}
+	if p.MessagesFirst(model) && slices.Contains(out, Anthropic) {
+		return Anthropic
 	}
 	return out[0]
 }

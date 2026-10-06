@@ -256,7 +256,12 @@ func magpieValue(a *Agent, f Field, v string, vals map[string]string) bool {
 // that the gateway takes as a group's (provider.GroupFor: gpt-6.1-sol is
 // group/auto-gpt-6-1-sol); "" for any other.
 func groupNamed(v string) string {
-	v = strings.TrimPrefix(strings.TrimSpace(v), magpieID+"/")
+	// Claude Code's [1m] mark rides on the group's id as it does on a
+	// model's, and one of the two values here comes from the agent's own
+	// settings: without it off, a group read back marked is not the one
+	// magpie set (GroupFor takes it off; so does GroupFinder)
+	v = strings.TrimSuffix(strings.TrimSpace(v), "[1m]")
+	v = strings.TrimPrefix(v, magpieID+"/")
 	if strings.HasPrefix(v, provider.GroupPrefix) {
 		return v
 	}

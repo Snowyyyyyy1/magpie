@@ -37,11 +37,14 @@ import (
 // Codex then never asks for the model list (its models manager skips the
 // fetch for an API key), so its picker was the models it was built with
 // and the one set, magpie's others missing, and the built-in ones went to
-// OpenAI with that key (#322). So it is too for a ChatGPT account that
-// has used its allowance up, which the Codex app won't send anything for,
-// whoever serves the model, and when the user asks for it (the sign-in
-// field's api): the Codex app is then in
-// its API state rather than signed in to ChatGPT. The base URL is set then
+// OpenAI with that key (#322). So it is too for a ChatGPT account the
+// Codex app holds, out of its allowance with no credits to go on with
+// (provider.CodexUsedUp), which it won't send anything for, whoever serves
+// the model, and when the user asks for it (the sign-in field's api): the
+// Codex app is then in its API state rather than signed in to ChatGPT, its
+// durable threads and remote control gone with it. A window at 100% alone
+// is not that: credits carry the account on, the app keeps sending, and
+// Codex stays signed in beside magpie's models. The base URL is set then
 // too: a thread started on the built-in provider is opened on it again, and
 // a magpie model picked in it would otherwise go to the ChatGPT backend.
 //
@@ -298,11 +301,11 @@ func codexIn(at place) *Agent {
 	// api: the user wants magpie as Codex's provider even while Codex is
 	// signed in to ChatGPT
 	api := func() bool { return stashLoad()[at.key("codex.login")] == "api" }
-	// out reports whether the ChatGPT account Codex is signed in to has
-	// used its allowance up, for magpie to become Codex's provider while it
-	// is (#540): never with the sign-in kept on ChatGPT (chatgpt), where
-	// the user would rather the Codex app wait for the account than leave
-	// its ChatGPT state
+	// out reports whether the Codex app holds the ChatGPT account Codex is
+	// signed in to (codexUsedUp), for magpie to become Codex's provider
+	// while it does (#540): never with the sign-in kept on ChatGPT
+	// (chatgpt), where the user would rather the Codex app wait for the
+	// account than leave its ChatGPT state
 	out := func() bool { return stashLoad()[at.key("codex.login")] != "chatgpt" && codexUsedUp() }
 	dropBase := func() error {
 		forget(at.key("codex.failover"))
@@ -564,11 +567,12 @@ func codexIn(at place) *Agent {
 				stash(map[string]string{at.key("codex.model"): get("model"), at.key("codex.effort"): get("model_reasoning_effort"),
 					at.key("codex.provider"): get("model_provider"), at.key("codex.catalog"): get("model_catalog_json")})
 			}
-			// a ChatGPT account out of allowance keeps the Codex app from
-			// sending at all, a magpie model's request too; as a provider
-			// of Codex's own, magpie is past that. Wired so for that
-			// alone, it is marked (codex.out), for Sync to put it back
-			// beside the sign-in once the allowance is back.
+			// a ChatGPT account the Codex app holds (out of allowance and
+			// of credits) keeps it from sending at all, a magpie model's
+			// request too; as a provider of Codex's own, magpie is past
+			// that. Wired so for that alone, it is marked (codex.out), for
+			// Sync to put it back beside the sign-in once the account has
+			// room again.
 			chatgpt := !api() && codexChatGPT(dir)
 			if chatgpt && !out() {
 				forget(at.key("codex.out"))
@@ -750,13 +754,13 @@ func codexIn(at place) *Agent {
 			if m := get("model"); isMagpie(m) && viaBase() && get("model_provider") == "" && !codexChatGPT(dir) {
 				return set(m)
 			}
-			// the ChatGPT account used its allowance up after a magpie
-			// model was picked beside its sign-in: the Codex app then
-			// sends nothing, a magpie model's turn included, in a new
-			// thread or an old one (#540), so magpie becomes Codex's
-			// provider as set does for an account already out; and once
-			// the allowance is back (or Codex is on an account with
-			// room), Codex's own models join magpie's again
+			// the ChatGPT account ran out (of its allowance and its
+			// credits) after a magpie model was picked beside its sign-in:
+			// the Codex app then sends nothing, a magpie model's turn
+			// included, in a new thread or an old one (#540), so magpie
+			// becomes Codex's provider as set does for an account already
+			// out; and once the account has room again (or Codex is on
+			// one with room), Codex's own models join magpie's again
 			if m := get("model"); isMagpie(m) && !api() && codexChatGPT(dir) {
 				switch {
 				case viaBase() && !asProvider() && out():
@@ -970,8 +974,8 @@ func codexIn(at place) *Agent {
 			{
 				// how Codex takes magpie's models: beside its ChatGPT
 				// sign-in (openai_base_url), magpie its provider only while
-				// the account is used up (""); beside it always, the
-				// account used up or not (chatgpt); or with magpie as its provider,
+				// the Codex app holds the account (""); beside it always,
+				// held or not (chatgpt); or with magpie as its provider,
 				// the Codex app in its API state. Kept in the stash, where
 				// set("") leaves it.
 				Key: "login", Label: "sign-in", Quiet: true,
@@ -998,8 +1002,8 @@ func codexIn(at place) *Agent {
 				},
 				Options: func(map[string]string) []Option {
 					return []Option{
-						{Value: "", Label: "ChatGPT", Note: "magpie's models join Codex's own; Codex stays signed in to ChatGPT, and while its account is used up magpie is Codex's provider, so the Codex app still sends"},
-						{Value: "chatgpt", Label: "Always ChatGPT", Note: "as ChatGPT, and kept so when its account is used up: magpie never becomes Codex's provider. The Codex app may then send nothing till the account has room; Codex CLI goes on through magpie"},
+						{Value: "", Label: "ChatGPT", Note: "magpie's models join Codex's own; Codex stays signed in to ChatGPT, and while the Codex app blocks its account (out of allowance, no credits left) magpie is Codex's provider, so the app still sends"},
+						{Value: "chatgpt", Label: "Always ChatGPT", Note: "as ChatGPT, and kept so while the Codex app blocks its account: magpie never becomes Codex's provider. The Codex app may then send nothing till the account has room; Codex CLI goes on through magpie"},
 						{Value: "api", Label: "magpie API", Note: "magpie is Codex's provider; the Codex app is in its API state, with magpie's models only"},
 					}
 				},
@@ -1217,7 +1221,8 @@ func codexStaleCache(path, tag string) error {
 }
 
 // codexUsedUp reports whether the ChatGPT account Codex is signed in to
-// has used up its allowance. A var so tests can say.
+// is held by the Codex app, out of its allowance with no credits to go on
+// with (provider.CodexUsedUp). A var so tests can say.
 var codexUsedUp = func() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

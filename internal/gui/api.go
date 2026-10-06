@@ -315,9 +315,9 @@ type settingsJSON struct {
 	AddrEnv string `json:"addrEnv,omitempty"`
 	// Dir is the data folder beside a portable magpie (#508)
 	Portable bool `json:"portable,omitempty"`
-	// Notice is advice after a change, e.g. a setting that didn't reach the
-	// agent's config (a Settings-page change carries no agents of its own,
-	// so this is where such a change says so)
+	// Notice is a Settings row's warning when a setting can't take effect:
+	// the Codex subagents row when Codex's own multi_agent_v2 is on in the
+	// config magpie routes (#141)
 	Notice string `json:"notice,omitempty"`
 	// Mac apps that explicitly handle .command files, for resumed sessions.
 	TerminalApps    []terminalChoice `json:"terminalApps,omitempty"`
@@ -541,6 +541,13 @@ func settingsState() settingsJSON {
 			}
 			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: p.ID + "/" + m.ID, Name: name, Provider: p.ID, PName: p.Name, Icon: p.Icon})
 		}
+	}
+	// the Codex subagents row's warning: magpie's multi-agent V1 doesn't reach
+	// Codex where its own multi_agent_v2 is on in the config magpie routes, and
+	// magpie writes nothing there — the setting is the user's to turn off
+	// (#141). Shown on every read, so the row carries it after a reload too.
+	if s.CodexAgentsV1 {
+		s.Notice = agent.CodexSubAgentsV1Warning()
 	}
 	return s
 }
@@ -1161,14 +1168,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		s := settingsState()
-		// the setting reaches Codex's config through the agents' sync; say
-		// so when it didn't land (Codex not routed, a failed write, or the
-		// user's own value left in place) rather than implying success
-		if a, err := agent.Find("codex"); err == nil && a.Notice != nil {
-			s.Notice = a.Notice()
-		}
-		writeJSON(rw, s)
+		writeJSON(rw, settingsState())
 	})
 	// whether Codex and Claude Code are told a model's whole context window
 	// or the working one (settings.FullContext): their lists are written

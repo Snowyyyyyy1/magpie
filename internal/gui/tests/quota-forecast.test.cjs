@@ -354,23 +354,52 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         }
       }
 
-      // the tray panel: the same verdict, one compact line a window, no chart
-      const panel = await open("panel", "http://magpie.test/?mode=panel", "dark", { width: 440, height: 700 });
-      await panel.locator('#ptabs [data-ptab="usage"]').click();
-      const pcard = panel.locator(".pq-card", { hasText: "ada@example.com" });
-      await pcard.locator(".pq-verdict").first().waitFor();
-      assert.deepEqual(await pcard.locator(".pq-verdict > b").allTextContents(), [w.five, w.week, w.monthly]);
-      assert.deepEqual(await pcard.locator(".pq-verdict > span").allTextContents(),
-        [w.lasts, w.runout, w.histRunout + " " + w.hist]);
-      assert.deepEqual(await pcard.locator(".pq-verdict").evaluateAll((es) => es.map((e) => e.className)),
-        ["pq-verdict k-safe", "pq-verdict k-warn", "pq-verdict k-warn"]);
-      const bcard = panel.locator(".pq-card", { hasText: "bob@example.com" });
-      assert.deepEqual(await bcard.locator(".pq-verdict > span").allTextContents(),
-        [w.spent, w.lastsHist + " " + w.hist], "no line for the window it has no readings of");
-      assert.deepEqual(await bcard.locator(".pq-verdict > b").allTextContents(), [w.week, w.five]);
-      assert.equal(await panel.locator(".pq-card .quota-plot").count(), 0, "no chart in the tray");
-      const spark = await boxOf(pcard.locator("svg.pq-spark"));
-      assert.ok(fits(spark), "the tray's spark draws at " + spark.content + " in a " + spark.box + " box");
+      // the tray panel: the same verdict, one compact line a window, no chart.
+      // The tray is narrow and scrolls, so the verdict wraps; measure the
+      // rendered box in both themes, in every language, without scrolling a
+      // card into view.
+      for (const ptheme of ["dark", "light"]) {
+        const panel = await open("panel-" + ptheme, "http://magpie.test/?mode=panel", ptheme, { width: 440, height: 700 });
+        await panel.locator('#ptabs [data-ptab="usage"]').click();
+        const pcard = panel.locator(".pq-card", { hasText: "ada@example.com" });
+        await pcard.locator(".pq-verdict").first().waitFor();
+        assert.deepEqual(await pcard.locator(".pq-verdict > b").allTextContents(), [w.five, w.week, w.monthly]);
+        assert.deepEqual(await pcard.locator(".pq-verdict > span").allTextContents(),
+          [w.lasts, w.runout, w.histRunout + " " + w.hist]);
+        assert.deepEqual(await pcard.locator(".pq-verdict").evaluateAll((es) => es.map((e) => e.className)),
+          ["pq-verdict k-safe", "pq-verdict k-warn", "pq-verdict k-warn"]);
+        const bcard = panel.locator(".pq-card", { hasText: "bob@example.com" });
+        assert.deepEqual(await bcard.locator(".pq-verdict > span").allTextContents(),
+          [w.spent, w.lastsHist + " " + w.hist], "no line for the window it has no readings of");
+        assert.deepEqual(await bcard.locator(".pq-verdict > b").allTextContents(), [w.week, w.five]);
+        assert.equal(await panel.locator(".pq-card .quota-plot").count(), 0, "no chart in the tray");
+        const spark = await boxOf(pcard.locator("svg.pq-spark"));
+        assert.ok(fits(spark), "the tray's spark draws at " + spark.content + " in a " + spark.box + " box");
+        // The longest line carries the multiplier and the history marker at
+        // once; at 440px German's is wider than the row, so it must wrap
+        // rather than be cut off (regression: it was ellipsized). Each
+        // verdict's label and text stay inside their card, and no line
+        // overflows its own box in either direction.
+        const overflow = await panel.locator(".pq-card").evaluateAll((cards) => {
+          const out = [];
+          for (const card of cards) {
+            const cb = card.getBoundingClientRect();
+            for (const v of card.querySelectorAll(".pq-verdict")) {
+              const vb = v.getBoundingClientRect();
+              const label = v.querySelector(":scope > b");
+              const text = v.querySelector(":scope > span");
+              const tb = text && text.getBoundingClientRect();
+              const lb = label && label.getBoundingClientRect();
+              if (text && (text.scrollWidth > text.clientWidth + 1 || text.scrollHeight > text.clientHeight + 1)) out.push("clipped: " + text.textContent);
+              if (vb.left < cb.left - 1 || vb.right > cb.right + 1) out.push("verdict past card edge: " + v.textContent);
+              if (tb && (tb.left < cb.left - 1 || tb.right > cb.right + 1)) out.push("text past card edge: " + text.textContent);
+              if (lb && (lb.left < cb.left - 1 || lb.right > cb.right + 1)) out.push("label past card edge: " + label.textContent);
+            }
+          }
+          return out;
+        });
+        assert.deepEqual(overflow, [], "no tray verdict is clipped or leaves its card");
+      }
       assert.deepEqual(errors, []);
     });
   }
@@ -409,6 +438,64 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.match(await verdict.getAttribute("class"), /k-warn/);
     assert.equal(await plot.locator(".qc-axis .axzero").textContent(), "Runs out");
   });
+}
+
+// #1004: a sub2api key given a 5-hour, day and 7-day limit answers its own
+// windows now — 5 hours, 1 day, 7 days, in USD — so the Usage card must
+// draw them like any other: a meter each, and the forecast where magpie
+// has read them, with no card of its own to fall back to.
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  for (const lang of ["en", "de"]) {
+    test(`${engine} ${lang}: a sub2api key's own windows draw with the forecast`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
+      t.after(() => browser.close());
+      const now = Date.now();
+      const r5 = now + 2 * H, rd = now + 20 * H, rw = now + 5 * 24 * H;
+      const usd = (amount, limit) => ({ amount, limit, unit: "USD" });
+      const data = {
+        quotas: [{ provider: "sub2api", name: "Sub2API", windows: [
+          { name: "5 hours", used: 30, resetsAt: iso(r5), ...usd(90, 300) },
+          { name: "1 day", used: 55, resetsAt: iso(rd), ...usd(165, 300) },
+          { name: "7 days", used: 60, resetsAt: iso(rw), ...usd(480, 800) },
+        ] }],
+        history: [{ provider: "sub2api", user: "", lines: [
+          { name: "5 hours", points: cycle(r5 - 5 * H, now, 100, 70), forecast: {
+            state: "ok", source: "even", left: 70, evenLeft: 58, ahead: 12, ratePerHour: 6,
+            lastsToReset: true, etaSeconds: 0, leftAtReset: 20, headroom: 1.3, cycles: 0,
+            cycleStart: iso(r5 - 5 * H), resetsAt: iso(r5) } },
+          // a day is one cycle: too short for the history layer (two days and
+          // three completed cycles at least), so its forecast is the even burn
+          { name: "1 day", points: cycle(rd - 24 * H, now, 100, 45), forecast: {
+            state: "ok", source: "even", left: 45, evenLeft: 45, ahead: 0, ratePerHour: 2,
+            lastsToReset: false, etaSeconds: 6 * H / 1000, leftAtReset: -5, headroom: 0.9, cycles: 0,
+            cycleStart: iso(rd - 24 * H), resetsAt: iso(rd) } },
+          // a week is long enough to blend its completed cycles, so its line
+          // carries the history marker
+          { name: "7 days", points: cycle(rw - 7 * 24 * H, now, 100, 40), forecast: {
+            state: "ok", source: "history", left: 40, evenLeft: 48, ahead: -8, ratePerHour: 1,
+            lastsToReset: false, etaSeconds: 3 * 24 * H / 1000, leftAtReset: -10, headroom: 0.8, cycles: 3,
+            cycleStart: iso(rw - 7 * 24 * H), resetsAt: iso(rw) } },
+        ] }],
+      };
+      const page = await (await browser.newContext({ viewport: { width: 1180, height: 900 }, reducedMotion: "reduce" })).newPage();
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
+      await page.route("**/*", serve(lang, "light", false, data));
+      await page.goto("http://magpie.test/?view=usage");
+      const card = page.locator(".subscription-card", { hasText: "Sub2API" });
+      await card.locator(".quota-plot").first().waitFor();
+      const names = { en: ["5 hours", "1 day", "7 days"], de: ["5 Stunden", "1 Tag", "7 Tage"] }[lang];
+      assert.deepEqual(await card.locator(".qv-badge").allTextContents(), names, "the key's own windows are named");
+      assert.equal(await card.locator(".quota-plot").count(), 3, "each window has its own burn-down");
+      assert.equal(await card.locator("circle.qc-dot title").count(), 3, "each latest reading keeps its time");
+      const verdicts = await card.locator(".qv-text").evaluateAll((es) => es.map((e) => e.className));
+      assert.deepEqual(verdicts, ["qv-text k-safe", "qv-text k-warn", "qv-text k-warn"], "the forecast reaches a key's windows");
+      assert.equal(await card.locator(".qv-text").nth(2).locator(".qv-src").textContent(), words[lang].hist, "the week's line carries the history marker");
+      assert.equal(await page.locator(".status.err").count(), 0);
+      assert.deepEqual(errors, []);
+    });
+  }
 }
 
 // Plenty of readings without cycle timing, untouched cycles, young cycles,

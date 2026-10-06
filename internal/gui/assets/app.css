@@ -1389,7 +1389,9 @@ body.panel .profiles #save { height: 25px; } /* the field's: the line keeps its 
 .pq-verdict { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .pq-verdict > b { flex: none; font-weight: 600; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .pq-verdict .pq-src { font-style: normal; font-size: 9.5px; color: var(--muted); }
-.pq-verdict > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the tray is narrow and German's line is long, so the text wraps onto a
+   second line rather than being cut off; the window label (b) stays whole */
+.pq-verdict > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .pq-verdict.k-safe > span { color: var(--tk-s); }
 .pq-verdict.k-warn > span { color: var(--tk-n); }
 .pq-verdict.k-risk > span { color: var(--drift); }

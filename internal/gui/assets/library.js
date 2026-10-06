@@ -700,8 +700,13 @@
     if (rtk.path) {
       ttl.append(el("span", "note mono", rtk.version ? "v" + rtk.version : tilde(rtk.path)));
       // a newer release: upgraded the way this rtk was installed
-      const behind = rtk.latest && rtk.version && vNewer(rtk.latest, rtk.version);
+      // …unless the package manager that installed it (winget, Homebrew)
+      // doesn't have it yet: an upgrade through it would change nothing
+      // (#1025), so none is offered until it does
+      const waiting = !rtkUpgrading && rtk.waiting;
+      const behind = !waiting && rtk.latest && rtk.version && vNewer(rtk.latest, rtk.version);
       if (rtkUpgrading) ttl.append(tag(t("Upgrading…"), "lib-new"));
+      else if (waiting) ttl.append(tag(t("v{v} is out · waiting for {via}", { v: rtk.latest, via: rtk.waiting }), "", t("RTK {v} is out, but {via} has {has} so far — usually within a few days. Upgrade comes back once {via} has it.", { v: rtk.latest, via: rtk.waiting, has: rtk.waitingHas || rtk.version })));
       else if (behind) ttl.append(tag(t("v{v} is out", { v: rtk.latest }), "lib-new", t("RTK {v} is the latest release; this one is {have}", { v: rtk.latest, have: rtk.version })));
       else if (rtk.latest && rtk.version) ttl.append(tag(t("Up to date"), "", t("RTK {v} is the latest release", { v: rtk.latest })));
       if (behind || rtkUpgrading) {

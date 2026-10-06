@@ -467,8 +467,9 @@ func refreshAccounts(asJSON bool) error {
 // checkinWorkBuddy: `magpie accounts checkin` — WorkBuddy's daily check-in
 // (签到) for each WorkBuddy (China) account not in yet today, and Trae CN's
 // (每日签到) for each Trae CN account, and MiniMax Code's for each MiniMax
-// Code account, and Qoder's daily credits for each Qoder account, now, and
-// how each stands. The
+// Code account, and Qoder's daily credits for each Qoder account, and each
+// plugin's own check-in (auth.checkin) for its accounts, now, and how each
+// stands. The
 // settings do it on their own once a day.
 func checkinWorkBuddy(asJSON bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -476,6 +477,7 @@ func checkinWorkBuddy(asJSON bool) error {
 	rs := append(provider.CheckInWorkBuddy(ctx), provider.CheckInTrae(ctx)...)
 	rs = append(rs, provider.CheckInMiniMax(ctx)...)
 	rs = append(rs, provider.CheckInQoder(ctx)...)
+	rs = append(rs, provider.CheckInPlugins(ctx)...)
 	if rs == nil {
 		rs = []provider.WorkBuddyCheckin{}
 	}
@@ -498,6 +500,10 @@ func checkinWorkBuddy(asJSON bool) error {
 			r.User = "MiniMax Code " + r.User
 		case "qoder":
 			r.User = "Qoder " + r.User
+		default:
+			if r.Vendor != "" {
+				r.User = strings.TrimSpace(r.Vendor + " " + r.User)
+			}
 		}
 		switch r.Outcome {
 		case provider.CheckinClaimed, provider.CheckinDone:
@@ -516,6 +522,8 @@ func checkinWorkBuddy(asJSON bool) error {
 			fmt.Println(muted.Render("·"), r.User, muted.Render("not eligible for the check-in"))
 		case provider.CheckinInactive:
 			fmt.Println(muted.Render("·"), r.User, muted.Render("no check-in event now"))
+		case provider.CheckinCaptcha:
+			fmt.Println(muted.Render("·"), r.User, muted.Render(strings.TrimSpace("asks for a captcha: check in in its own app "+r.Msg)))
 		default:
 			fmt.Println(muted.Render("✗"), r.User, muted.Render(r.Msg))
 		}

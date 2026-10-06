@@ -146,6 +146,19 @@ const claudeContextEnv = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 // model, which Anthropic runs to its whole window.
 const claudeCompactEnv = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
+// claudeOutputEnv is the longest reply Claude Code asks a model for. One it
+// doesn't know (any but Claude's own names) it asks for 32000 at most
+// (claudeUnknownOutput), whatever the model can write, so a model that
+// writes more — a reasoning one, whose thinking counts toward the reply —
+// stopped at "Claude's response exceeded the 32000 output token maximum"
+// (H20 on Discord, DeepSeek through WorkBuddy). Claude Code caps the value
+// at 128000 for such a model, and at its own maximum for a Claude model.
+const claudeOutputEnv = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+
+// claudeUnknownOutput is the reply Claude Code asks a model it doesn't know
+// for without claudeOutputEnv (2.1.291).
+const claudeUnknownOutput = 32000
+
 // claudeCapsEnv tells Claude Code what a model it doesn't know can do, as
 // "<model>=effort,xhigh_effort;<model>=…" (a trailing * a prefix, [1m]
 // taken off the model first, the model lowercased, the pattern not). Run on
@@ -385,6 +398,20 @@ func claudeIn(at place) *Agent {
 		}
 		return nil
 	}
+	// the reply length magpie last wrote, kept apart from the user's own
+	// in the same way
+	outputKey := at.key("claude.output_tokens")
+	outputOurs := func() bool {
+		cur := env(claudeOutputEnv)
+		return cur != "" && cur == stashLoad()[outputKey]
+	}
+	dropOutput := func() error {
+		defer forget(outputKey)
+		if outputOurs() {
+			return edit.DelJSON(path, "env."+claudeOutputEnv)
+		}
+		return nil
+	}
 	// the capabilities magpie last wrote, kept apart from the user's own in
 	// the same way: theirs is left as it is, magpie's adds to nothing
 	capsKey := at.key("claude.capabilities")
@@ -541,6 +568,9 @@ func claudeIn(at place) *Agent {
 		if err := dropWindow(); err != nil {
 			return "", err
 		}
+		if err := dropOutput(); err != nil {
+			return "", err
+		}
 		if err := dropCompact(); err != nil {
 			return "", err
 		}
@@ -691,13 +721,30 @@ func claudeIn(at place) *Agent {
 		} else {
 			forget(windowKey)
 		}
-		if err := edit.SetJSON(path, kvs...); err != nil {
-			return err
-		}
 		models := []string{main}
 		for _, t := range claudeTiers {
 			m, _ := tierAt(tiers[t])
 			models = append(models, m)
+		}
+		outModels := models
+		if sub != "" {
+			m, _ := tierAt(sub)
+			outModels = append(slices.Clip(models), m)
+		}
+		// the longest reply the models can write, past the 32000 Claude
+		// Code would ask them for; one the user set is theirs
+		if env(claudeOutputEnv) == "" || outputOurs() {
+			if n := claudeOutput(outModels...); n > 0 {
+				kvs = append(kvs, edit.KV{Path: "env." + claudeOutputEnv, Value: strconv.Itoa(n)})
+				stash(map[string]string{outputKey: strconv.Itoa(n)})
+			} else if err := dropOutput(); err != nil {
+				return err
+			}
+		} else {
+			forget(outputKey)
+		}
+		if err := edit.SetJSON(path, kvs...); err != nil {
+			return err
 		}
 		if err := writeCompact(); err != nil {
 			return err
@@ -1346,6 +1393,39 @@ func claudeWindow(main string, tiers map[string]string) int {
 		}
 	}
 	return w
+}
+
+// claudeOutput is the reply length to tell Claude Code for the models it
+// runs on (main first), 0 to leave it to Claude Code: when the main model is
+// a Claude one, which Claude Code knows; when a model it runs on that isn't
+// has no known limit, as one value serves them all; and when the least of
+// theirs is no more than what Claude Code asks for anyway.
+func claudeOutput(models ...string) int {
+	if len(models) == 0 || claudeModel(models[0]) {
+		return 0
+	}
+	output := map[string]int{}
+	for _, m := range magpieModels("claude") {
+		output[m.ID] = m.Output
+	}
+	n := 0
+	for _, ref := range models {
+		if ref == "" || claudeModel(ref) {
+			continue
+		}
+		ref = strings.TrimSuffix(ref, "[1m]")
+		o := cmp.Or(output[ref], catalog.OutputOf(ref))
+		if o <= 0 {
+			return 0
+		}
+		if n == 0 || o < n {
+			n = o
+		}
+	}
+	if n <= claudeUnknownOutput {
+		return 0
+	}
+	return n
 }
 
 // claudeManaged is where an administrator's Claude Code settings live; a var

@@ -94,6 +94,8 @@ type host struct {
 	// windows made again whose page hasn't come yet, shown by whenLoaded's
 	// fn; on the main thread
 	loading map[*application.WebviewWindow]bool
+	// the main window placed as it was last left (placeMain), and so shown
+	placed atomic.Pointer[application.WebviewWindow]
 }
 
 // whenReady runs fn once the main window can be shown safely.
@@ -367,6 +369,7 @@ func Run(version string, showMain bool, link string) error {
 
 	h.panel = h.makePanel()
 	h.main = h.makeMain("/?" + theme)
+	onFonts = h.fontsChanged
 
 	// the menu in the page's language, relabelled when that changes (#301)
 	labels := trayMenuLabels(trayLang(settings.Load().Lang, systemLang), version, "")
@@ -536,13 +539,6 @@ func singleInstance(h *host) *application.SingleInstanceOptions {
 			}
 		},
 	}
-}
-
-func abs(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
 
 // flap plays trayFlap on the tray icon, a frame every 30ms as they were

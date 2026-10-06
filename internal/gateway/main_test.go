@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 func TestMain(m *testing.M) {
@@ -62,5 +63,9 @@ func isolatedTests(m *testing.M) (int, error) {
 	// no route is written to disk behind a test's back; the history's own
 	// tests call saveRoute themselves
 	keepRoutes = false
+	// no test asks a vendor: a provider with a real base URL and a made-up
+	// key would, in the background (a plan key's windows, #1016), and a
+	// plugin host's first start fetched models.dev
+	testenv.Offline()
 	return m.Run(), nil
 }

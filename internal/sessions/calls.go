@@ -339,9 +339,14 @@ func callHead(st *callFile, b []byte) bool {
 }
 
 // sessionOfPath is the session a Claude Code file belongs to by its name:
-// <id>.jsonl, or <id>/subagents/<agent>.jsonl.
+// <id>.jsonl, <id>/subagents/<agent>.jsonl, or a workflow's
+// <id>/subagents/workflows/<run>/<agent>.jsonl.
 func sessionOfPath(p string) string {
-	if d := filepath.Dir(p); filepath.Base(d) == "subagents" {
+	d := filepath.Dir(p)
+	if w := filepath.Dir(d); filepath.Base(w) == "workflows" && filepath.Base(filepath.Dir(w)) == "subagents" {
+		return filepath.Base(filepath.Dir(filepath.Dir(w)))
+	}
+	if filepath.Base(d) == "subagents" {
 		return filepath.Base(filepath.Dir(d))
 	}
 	return strings.TrimSuffix(filepath.Base(p), ".jsonl")

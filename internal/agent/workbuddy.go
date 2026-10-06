@@ -114,10 +114,19 @@ func workbuddyWired(path string) bool {
 // turned off in WorkBuddy stays off, and models the user pointed at a magpie
 // on another machine (a NAS's) stay there with its key, as ZCode's do
 // (zcodeAddress): a sync brings the models up to date, not the address.
-func workbuddyWrite(path string, on bool) error {
+func workbuddyWrite(path string, on bool) error { return buddyWrite(path, "workbuddy", on) }
+
+// buddyWrite is workbuddyWrite for an agent that reads this models.json:
+// WorkBuddy, or CodeBuddy Code (codebuddy.go), whose models go under the
+// agent's own key. A new file is a bare list for WorkBuddy, as it writes
+// one, and {"models":[…]} for CodeBuddy Code, as its docs give it.
+func buddyWrite(path, agent string, on bool) error {
 	d, err := workbuddyRead(path)
 	if err != nil {
 		return err
+	}
+	if d.rest == nil && d.models == nil && agent != "workbuddy" {
+		d.rest = map[string]json.RawMessage{}
 	}
 	var kept []json.RawMessage
 	var ours []string
@@ -146,8 +155,8 @@ func workbuddyWrite(path string, on bool) error {
 	var add []json.RawMessage
 	var ids []string
 	if on {
-		for _, m := range magpieModels("workbuddy") {
-			e := workbuddyModel(m.ID, m.Name, m.Context, maxTokens(m), m.Images, m.Efforts)
+		for _, m := range magpieModels(agent) {
+			e := buddyModel(agent, m.ID, m.Name, m.Context, maxTokens(m), m.Images, m.Efforts)
 			if off[m.ID] {
 				e["disabled"] = true
 			}
@@ -199,14 +208,15 @@ func workbuddyWrite(path string, on bool) error {
 	return edit.WriteAtomic(path, append(b, '\n'))
 }
 
-// workbuddyModel is one of magpie's models as a models.json entry.
-func workbuddyModel(id, name string, context, output int, images bool, efforts []string) map[string]any {
+// buddyModel is one of magpie's models as a models.json entry, under
+// agent's key.
+func buddyModel(agent, id, name string, context, output int, images bool, efforts []string) map[string]any {
 	if context == 0 {
 		context = 200000
 	}
 	e := map[string]any{
 		"id": id, "name": name, "vendor": magpieID,
-		"apiKey": gateway.TokenFor("workbuddy"), "url": gatewayV1() + "/chat/completions",
+		"apiKey": gateway.TokenFor(agent), "url": gatewayV1() + "/chat/completions",
 		"maxInputTokens":   context,
 		"supportsToolCall": true, "supportsImages": images, "supportsReasoning": false,
 	}

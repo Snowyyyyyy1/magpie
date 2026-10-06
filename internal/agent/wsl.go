@@ -119,13 +119,16 @@ func (p place) key(k string) string {
 
 // distro is one WSL distro, as probed.
 type distro struct {
-	Name    string            `json:"name"`
-	Home    string            `json:"home"`              // $HOME inside it, e.g. /home/me
-	Root    string            `json:"root"`              // where magpie opens its / from, e.g. \\wsl.localhost\Ubuntu
-	Has     map[string]bool   `json:"has"`               // "dir:.codex", "bin:pi": what the probe found
-	Probe   int               `json:"probe,omitempty"`   // the wslProbeVersion that found it
-	Gateway string            `json:"gateway,omitempty"` // the Windows host as the distro reaches it, when not mirrored
-	Values  map[string]string `json:"values,omitempty"`  // its agents' fields as last read (wslKind.memo), shown while it is stopped
+	Name    string          `json:"name"`
+	Home    string          `json:"home"`              // $HOME inside it, e.g. /home/me
+	Root    string          `json:"root"`              // where magpie opens its / from, e.g. \\wsl.localhost\Ubuntu
+	Has     map[string]bool `json:"has"`               // "dir:.codex", "bin:pi": what the probe found
+	Probe   int             `json:"probe,omitempty"`   // the wslProbeVersion that found it
+	Gateway string          `json:"gateway,omitempty"` // the Windows host as the distro reaches it, when not mirrored
+	// Was are the addresses it reached Windows at before, newest last: an
+	// agent's config still on one is offered the one now (#1013)
+	Was    []string          `json:"was,omitempty"`
+	Values map[string]string `json:"values,omitempty"` // its agents' fields as last read (wslKind.memo), shown while it is stopped
 	// Net is WSL's networking mode as the distro's wslinfo said at the
 	// last probe ("mirrored", "nat", "virtioproxy", "none"); "" when it
 	// couldn't say (a WSL without wslinfo), and .wslconfig is read instead
@@ -702,6 +705,7 @@ func wslDistros() []distro {
 					if wslFound(*d) {
 						if old := wsl.seen[n]; old != nil {
 							d.Values = old.Values
+							d.Was = wslWas(old.Was, old.Gateway, d.Gateway)
 						}
 						wsl.seen[n] = d
 					} else {
@@ -729,6 +733,23 @@ func wslDistros() []distro {
 		}
 	}
 	wslSaveLocked()
+	return out
+}
+
+// wslWas is the addresses a distro reached Windows at before, with the
+// last one (was) added when it reaches Windows elsewhere now: the newest
+// few, now's left out.
+func wslWas(before []string, was, now string) []string {
+	out := slices.DeleteFunc(slices.Clone(before), func(h string) bool { return h == was || h == now })
+	if was != "" && was != now {
+		out = append(out, was)
+	}
+	if len(out) > 4 {
+		out = out[len(out)-4:]
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 

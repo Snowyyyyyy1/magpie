@@ -227,10 +227,27 @@ function gatewayModelsBadge(k) {
     if (!b.isConnected) return;
     const opts = [{ v: "", name: "All models", note: "Any model and any account, now and later" }];
     const seen = new Set();
+    // the accounts and keys the key may be held to (#905), each right
+    // after its provider's models, not one block at the end: an account
+    // by who is signed in, a key by its fingerprint
+    const accountsSet = new Set();
+    const ofProvider = new Map();
+    for (const a of accounts || []) {
+      accountsSet.add(a.id);
+      const o = { v: a.id, name: a.name, note: a.plan ? a.providerName + " · " + a.plan : a.providerName, literalName: true };
+      ofProvider.set(a.provider, [...(ofProvider.get(a.provider) || []), o]);
+    }
+    let listed = "";  // the provider whose models the list is in
+    const endBlock = () => {
+      for (const o of ofProvider.get(listed) || []) opts.push(o);
+      ofProvider.delete(listed);
+      listed = "";
+    };
     for (const m of models || []) {
       // a routing group the key names is its with every member in it
       // (Magic_zero on Discord); the groups come first
       if (m.group) {
+        endBlock();
         if (!seen.has("group")) {
           seen.add("group");
           opts.push({ v: "group/*", name: "Every routing group", note: "group/*" });
@@ -238,21 +255,23 @@ function gatewayModelsBadge(k) {
         opts.push({ v: m.id, name: m.name, note: m.id, literalName: true });
         continue;
       }
+      if (m.provider !== listed) {
+        endBlock();
+        listed = m.provider;
+      }
       if (!seen.has(m.provider)) {
         seen.add(m.provider);
         opts.push({ v: m.provider + "/*", name: t("Every {provider} model", { provider: m.providerName }), note: m.provider + "/*", literalName: true });
       }
       opts.push({ v: m.id, name: m.name, note: m.id, literalName: true });
     }
-    // the accounts and keys the key may be held to (#905), after the
-    // models: an account by who is signed in, a key by its fingerprint
-    const accountsSet = new Set();
-    for (const a of accounts || []) {
-      accountsSet.add(a.id);
-      opts.push({ v: a.id, name: a.name, note: a.plan ? a.providerName + " · " + a.plan : a.providerName, literalName: true });
-    }
+    endBlock();
+    // a provider with accounts and no model in the list (one kept
+    // unlisted, or serving none now) keeps its accounts after the models
+    for (const os of ofProvider.values()) opts.push(...os);
     // what the CLI kept that the list hasn't, a pattern, a model gone or
-    // an account signed out
+    // an account signed out: behind every live entry, a model gone
+    // before an account signed out
     for (const v of ms) if (!opts.some((o) => o.v === v)) opts.push({ v, name: v, note: "Not served now", literalName: true });
     for (const v of as) if (!accountsSet.has(v)) { accountsSet.add(v); opts.push({ v, name: v, note: "Not signed in now", literalName: true }); }
     openProtoMenu(b, opts, [...ms, ...as], (picked) => {

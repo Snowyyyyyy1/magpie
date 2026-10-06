@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -500,6 +501,21 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
 		rs := provider.CheckInQoder(ctx)
+		if rs == nil {
+			rs = []provider.WorkBuddyCheckin{}
+		}
+		writeJSON(rw, rs)
+	})
+	// and a plugin's own, for each account of the provider it names
+	mux.HandleFunc("POST /api/usage/plugin-checkin", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Provider string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Provider == "" {
+			fail(rw, errors.New("no provider"))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		rs := provider.CheckInPlugins(ctx, in.Provider)
 		if rs == nil {
 			rs = []provider.WorkBuddyCheckin{}
 		}

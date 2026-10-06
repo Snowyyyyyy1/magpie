@@ -779,6 +779,21 @@ func (p Provider) Efforts(model string) []string {
 	return effortsKept(nil, settings.Load().ModelEfforts[p.ID+"/"+model])
 }
 
+// Thinks reports whether the model reasons: it has levels, its list says
+// it thinks, or models.dev says most of those serving it do (Entry's
+// Reasoning).
+func (p Provider) Thinks(model string) bool {
+	if len(p.Efforts(model)) > 0 {
+		return true
+	}
+	for _, m := range p.Available() {
+		if m.ID == model && m.Reasoning {
+			return true
+		}
+	}
+	return catalog.Thinks(model)
+}
+
 // Known are the model's own reasoning levels, when known.
 func (p Provider) Known(model string) []string {
 	for _, m := range p.Available() {

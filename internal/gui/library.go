@@ -166,13 +166,14 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	// installing rtk when the page is asked to
 	mux.HandleFunc("GET /api/library/rtk", func(rw http.ResponseWriter, r *http.Request) {
 		v := library.ReadRTK()
-		// its latest release, when GitHub answers in time: the page is
-		// drawn without it otherwise, and has it next time
+		// its latest release, and whether winget or Homebrew has it yet,
+		// when they answer in time: the page is drawn without them
+		// otherwise, and has them next time
 		if v.Path != "" {
-			latest := make(chan string, 1)
-			go func() { latest <- library.RTKLatest() }()
+			checked := make(chan *library.RTKView, 1)
+			go func() { c := *v; c.CheckLatest(); checked <- &c }()
 			select {
-			case v.Latest = <-latest:
+			case v = <-checked:
 			case <-time.After(3 * time.Second):
 			}
 		}

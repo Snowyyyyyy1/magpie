@@ -87,6 +87,7 @@ func All() []*Agent {
 		copilot(home),
 		crush(home, cfg),
 		dsh(home),
+		reasonix(home),
 		commandCode(home),
 		fx(home),
 		omp(home),
@@ -104,6 +105,7 @@ func All() []*Agent {
 		grok(home),
 		zcode(home),
 		workbuddy(home),
+		codebuddy(home),
 		pencil(home),
 		t3code(home),
 		hanako(home),
@@ -896,7 +898,7 @@ func goose(home, cfg string) *Agent {
 		ID: "goose", Name: "Goose", Icon: "goose", Bin: "goose", Dir: filepath.Dir(path), Path: path, Spelled: prefixed,
 		UA: []string{"goose"},
 		Check: func() string {
-			if p, _ := get("GOOSE_PROVIDER"); p != gooseProviderID {
+			if p, _ := gooseActive(path); p != gooseProviderID {
 				return ""
 			}
 			return wiringOff("Goose", provider, func(k string) (string, bool) { return edit.GetJSON(provider, k) },
@@ -905,7 +907,7 @@ func goose(home, cfg string) *Agent {
 		Sync: func() error { return syncGooseProvider(provider) },
 		// goose loads custom_providers when it starts
 		Notice: func() string {
-			if p, _ := get("GOOSE_PROVIDER"); p == gooseProviderID && Running(`Goose\.app/`, `(^|/)goose( |$)`) {
+			if p, _ := gooseActive(path); p == gooseProviderID && Running(`Goose\.app/`, `(^|/)goose( |$)`) {
 				return "Goose loads its providers at start-up — quit and reopen Goose (and open goose sessions) to use magpie's models."
 			}
 			return ""
@@ -921,10 +923,11 @@ func goose(home, cfg string) *Agent {
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
-			Get: pairGet(get, "GOOSE_PROVIDER", "GOOSE_MODEL"),
+			// the layout goose keeps it in, old or new (see goose.go)
+			Get: func() string { return gooseModel(path) },
 			Set: func(v string) error {
 				if v == "" {
-					if err := edit.DelYAMLTop(path, "GOOSE_PROVIDER", "GOOSE_MODEL"); err != nil {
+					if err := clearGooseModel(path); err != nil {
 						return err
 					}
 					return removeGooseProvider(provider)
@@ -937,10 +940,13 @@ func goose(home, cfg string) *Agent {
 						return err
 					}
 				}
-				return pairSet(set, "GOOSE_PROVIDER", "GOOSE_MODEL")(v)
+				return setGooseModel(path, v)
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur["model"], "anthropic", "openai", "google", "openrouter"), viaMagpie("goose", gooseProviderID+"/")...)
+				// only the native providers this goose is set up with (#987:
+				// every one of four was listed, OpenRouter's hundreds of
+				// models on a goose that had only magpie)
+				return append(ownOptions("", cur["model"], gooseConfigured(path)...), viaMagpie("goose", gooseProviderID+"/")...)
 			},
 		}, {
 			// GOOSE_THINKING_EFFORT, the effort goose asks of a model that

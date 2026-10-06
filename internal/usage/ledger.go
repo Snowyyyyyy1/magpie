@@ -497,9 +497,9 @@ func (t *Totals) addRow(r Row) {
 	if r.TTFT > 0 && !r.Failed() {
 		t.Timed++
 		t.TTFT += r.TTFT
-		if w := DecodeWindow(r.Output, r.Millis, r.TTFT); w > 0 {
+		if n, w := r.Decode(); w > 0 {
 			t.DecodeMs += w
-			t.DecodeOut += r.Output
+			t.DecodeOut += n
 		}
 	}
 	t.Calls++
@@ -631,9 +631,9 @@ func (p *Part) add(r Row) {
 	if r.TTFT > 0 && !r.Failed() {
 		p.Timed++
 		p.TTFT += r.TTFT
-		if w := DecodeWindow(r.Output, r.Millis, r.TTFT); w > 0 {
+		if n, w := r.Decode(); w > 0 {
 			p.DecodeMs += w
-			p.DecodeOut += r.Output
+			p.DecodeOut += n
 		}
 	}
 }

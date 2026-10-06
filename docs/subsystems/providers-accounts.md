@@ -39,6 +39,43 @@ keys and accounts per request is in [Gateway routing and fallback](gateway-routi
 3. **Sign.** For each try, `Sign` gives the request its auth. A token about to expire is refreshed first, and the rotated tokens go back to their one holder: the agent's store, or `logins.json` for an account standing behind it.
 4. **Allowance.** Usage endpoints are rate limited, so `SubscriptionUsage` caches its results: a cached copy comes back at once and a stale one is refreshed in the background. When an account's windows start again, `OnRenewed` tells the gateway so a resting account can come back. A key's reading that finds a window it was full in (at `SpentShareOf` its routing) full no more, or full till sooner, tells it too, as agent `""` and the key's `KeyAllowanceID`, so a key out of its limit is back once the limit is raised or its usage reset; a first reading, a failed one, or one that finds it fuller tells nothing.
 
+## Allowance history and forecasts
+
+[`quota_history.go`](../../internal/provider/quota_history.go) records each
+window's observed percent left, observation time, cycle start and reset.
+`QuotaHistories` serves those lines through `GET /api/usage/quotas/history`
+and `GET /v1/magpie/quotas/history`. Each line may also carry a derived
+`forecast`; changing the requested `days` trims the displayed points, not
+the full history used to forecast. Forecasts are never persisted or synced.
+
+[`quota_forecast.go`](../../internal/provider/quota_forecast.go) compares
+current consumption with an even burn. Windows of at least two days may
+also use at least three completed cycles with sufficient readings and
+coverage. The more conservative result wins: either layer can warn that the
+allowance runs out. Unknown cycles, insufficient readings and expired resets
+have no forecast; `state: "none"` means the cycle is too young or too little
+is consumed, `"spent"` means an observed depleted allowance, and `"ok"`
+means a projection is available. The backend returns numbers and enums;
+labels belong to the UI's translations.
+
+A forecast's `asOf` is its last observation, which fixes its rate, ahead
+percentage, verdict, projected `leftAtReset` and `headroom`. Unobserved time
+never counts as zero consumption. `runsOutAt`, when present, is that
+projection's fixed crossing; `etaSeconds` counts down from the query's clock
+and floors at zero after the crossing. An expired projection does not claim
+an observed `"spent"` state. A reset that has passed ends the forecast,
+and readings from a new cycle cannot reuse the previous cycle's verdict.
+
+The Usage page and tray share the same verdict in
+[`app.js`](../../internal/gui/assets/app.js). Each full account window has
+its own burn-down, even-burn line and projected crossing or reset remainder.
+The actual dot is at the reading's time, with a reading tooltip; the vertical
+line marks now. The shared legend explains the marks, and the range menu
+changes charts without changing the verdict. Brief accounts retain meters
+only. Clicking a plot or pressing Enter enlarges it without scrolling; the
+tray keeps a compact verdict and sparkline. Resizing redraws from the stable
+card container on the next animation frame, avoiding WebKit observer loops.
+
 ## Constraints and failure behavior
 
 - Each refresh token has exactly one holder. Vendors rotate tokens on refresh, so two copies of one token would sign each other out. `savedTokenMu` stops two requests refreshing one saved account at once.
@@ -55,7 +92,15 @@ keys and accounts per request is in [Gateway routing and fallback](gateway-routi
 
 ```sh
 go test -tags nogui ./internal/provider -run 'TestAccount|TestCodex|TestGroup|TestQuota|TestLogin|TestSignIn|TestSeveralKeys|TestKeyProtocol|TestSetKeyWeight|TestReadSub2APIKeyLimits|TestSub2APIKeyLimitsOnItsCard|TestKeyAllowance|TestPlanKeyAllowance|TestPayAsYouGoKeyAskedSeldom'
-go test -tags nogui ./internal/provider
+go test -tags nogui ./internal/provider -count=1
+```
+
+The forecast regressions include `TestQuotaHistoriesForecastIgnoresDisplayDays`,
+`TestQuotaForecastOldReading` and `TestQuotaForecastStaysOutOfSync`. Browser
+checks use Node and Playwright:
+
+```sh
+node --test internal/gui/tests/quota-curve.test.cjs internal/gui/tests/quota-forecast.test.cjs internal/gui/tests/balance-curve.test.cjs
 ```
 
 The package's tests use a home of their own (`testenv`). Never point them at

@@ -17536,10 +17536,11 @@ function renderTrayUsage(s, keep) {
     (v) => savePrefs({ ...keep, chineseUnits: v })));
   renderAlerts(s, keep);
   $("#plainNamesSegs").replaceChildren(suffixSegs());
-  // Codex's OpenAI models in multi-agent V1, so their subagents can run on
-  // magpie's other models (#141)
+  // Codex's own models in multi-agent V1 (their subagents' tasks go as
+  // text), and magpie's multi_agent_v2 override in the config it routes, so
+  // a GPT lead can run a subagent on magpie's other models (#141)
   $("#codexAgentsV1Segs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.codexAgentsV1 ? "on" : "off", (v) =>
-    writingPrefs(api("settings/codex-agents-v1", { on: v === "on" })).then((ns) => { prefs = ns; renderSettings(); }).catch((e) => { status(t(e.message), "err"); renderSettings(); })));
+    writingPrefs(api("settings/codex-agents-v1", { on: v === "on" })).then((ns) => { prefs = ns; renderSettings(); if (ns.notice) status(t(ns.notice), "warn", 9000); }).catch((e) => { status(t(e.message), "err"); renderSettings(); })));
   // a 1M model's whole window, or compacting at the working one (X: Chen,
   // 70–90s to a first token at 550K)
   // at a size the user types too, not 272K alone (#876); a provider's own

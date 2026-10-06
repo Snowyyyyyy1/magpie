@@ -138,6 +138,153 @@ func codexIn(at place) *Agent {
 		return catalog.Codex()
 	}
 	var dropSubEffort func() error
+	// features.multi_agent_v2 is the key magpie turns off in the config it
+	// routes while settings.CodexAgentsV1 is on, so Codex's own V2 (which
+	// seals a subagent's task, which a magpie-served subagent can't read) is
+	// off and the V1 entries magpie hands it take effect (#141). While magpie
+	// owns the key, multiAgentV2Key holds the user's own value from before it
+	// wrote — "true", "false", or "absent" for no such key — so the setting
+	// off puts that back. A value the user edits by hand is theirs: magpie
+	// drops its record and stays out, marked by multiAgentV2OwnKey, until the
+	// setting is turned off and on again.
+	multiAgentV2Key := at.key("codex.multiAgentV2")
+	multiAgentV2OwnKey := at.key("codex.multiAgentV2.user")
+	// featureValue is the config's own features.multi_agent_v2, "absent" for
+	// none; a read or parse error is returned, never taken for an absent key.
+	featureValue := func() (string, error) {
+		t, err := edit.GetTOMLTable(path, "features")
+		if err != nil {
+			return "", err
+		}
+		if t == nil {
+			return "absent", nil
+		}
+		if v, ok := t["multi_agent_v2"]; ok {
+			return v, nil
+		}
+		return "absent", nil
+	}
+	// restoreSubAgentsV1 puts back the multi_agent_v2 the user had before
+	// magpie's override, dropping magpie's record of it only once the write
+	// lands: a failed write keeps the record, so a later sync tries again.
+	// A value the user edited by hand is left as it is. Called on Unwire and
+	// on setting Codex back to its own, so the override goes even where the
+	// route is removed with it.
+	restoreSubAgentsV1 := func() error {
+		was := stashLoad()[multiAgentV2Key]
+		if was == "" {
+			// no override of magpie's to put back; drop a stay-out mark
+			forget(multiAgentV2OwnKey)
+			return nil
+		}
+		cur, err := featureValue()
+		if err != nil {
+			return err
+		}
+		if cur != "false" {
+			// the user's own value, a hand edit while the setting was on:
+			// theirs stays, magpie owns nothing to put back. A put-back
+			// whose record couldn't be dropped lands here too, so the next
+			// sync clears the record without writing over the value again.
+			forget(multiAgentV2Key, multiAgentV2OwnKey)
+			return nil
+		}
+		if was == "false" {
+			// the user's own value was false too: nothing to write
+			forget(multiAgentV2Key, multiAgentV2OwnKey)
+			return nil
+		}
+		if was == "absent" {
+			err = edit.DelTOMLKey(path, "features", "multi_agent_v2")
+		} else {
+			err = edit.SetTOMLKey(path, "features", "multi_agent_v2", true)
+		}
+		if err != nil {
+			return err
+		}
+		forget(multiAgentV2Key, multiAgentV2OwnKey)
+		return nil
+	}
+	// keepSubAgentsV1 writes the override into the config Codex is routed
+	// through, remembering the user's value first so the setting off puts it
+	// back. Only a config magpie already routes is touched, repeated syncs
+	// write nothing more, and a value the user edits by hand is left alone.
+	keepSubAgentsV1 := func() error {
+		if !codexcat.V1() {
+			return restoreSubAgentsV1()
+		}
+		if !routed() {
+			return nil
+		}
+		if stashLoad()[multiAgentV2OwnKey] != "" {
+			// the user edited the key by hand while the setting was on:
+			// magpie stays out until the setting is turned off and on again
+			return nil
+		}
+		cur, err := featureValue()
+		if err != nil {
+			return err
+		}
+		was := stashLoad()[multiAgentV2Key]
+		if was == "" {
+			if cur == "false" {
+				// already off: nothing to write, but magpie owns it now, so a
+				// later hand edit is left alone
+				return stashChecked(map[string]string{multiAgentV2Key: "false"})
+			}
+			// not magpie's yet: record the user's value durably first, so the
+			// override can always be put back — a record that didn't land
+			// leaves the config untouched, and a failed override drops the
+			// record so magpie owns nothing it never wrote
+			if err := stashChecked(map[string]string{multiAgentV2Key: cur}); err != nil {
+				return err
+			}
+			if err := edit.SetTOMLKey(path, "features", "multi_agent_v2", false); err != nil {
+				if ferr := forgetChecked(multiAgentV2Key); ferr != nil {
+					return fmt.Errorf("%w (and dropping the record of the value to put back: %v)", err, ferr)
+				}
+				return err
+			}
+			return nil
+		}
+		// magpie owns it: a value still off needs no write
+		if cur == "false" {
+			return nil
+		}
+		// the user edited it by hand: theirs now, magpie stays out until the
+		// setting is turned off and on again. One write drops the record of
+		// the user's value and marks the key theirs, so a failure leaves the
+		// record intact and the override is never applied over it.
+		return stashChecked(map[string]string{multiAgentV2Key: "", multiAgentV2OwnKey: "1"})
+	}
+	// subAgentsV1Notice says what to tell the user when settings.CodexAgentsV1
+	// is on but the override isn't in the config Codex is routed through:
+	// Codex not routed through magpie, magpie's write failed, or the user's
+	// own value (a hand edit) left in place; and when the setting is off but
+	// magpie couldn't yet put the user's own value back. "" when all is as
+	// asked.
+	subAgentsV1Notice := func() string {
+		if !codexcat.V1() {
+			if stashLoad()[multiAgentV2Key] != "" {
+				return "magpie couldn't put your own multi_agent_v2 back in Codex's config yet; it will try again."
+			}
+			return ""
+		}
+		if !routed() {
+			return "Codex's multi-agent V1 is on, but Codex isn't connected to magpie here: magpie turns Codex's own multi_agent_v2 off only in the config it routes."
+		}
+		if stashLoad()[multiAgentV2OwnKey] != "" {
+			return "Codex's multi-agent V1 is on, but your own multi_agent_v2 in Codex's config is left as it is; switch the setting off and on to have magpie write it again."
+		}
+		cur, err := featureValue()
+		if err != nil {
+			return "Codex's multi-agent V1 is on, but magpie couldn't read Codex's config (" + err.Error() + ")."
+		}
+		if cur != "false" {
+			return "Codex's multi-agent V1 is on, but magpie couldn't turn Codex's own multi_agent_v2 off in its config; it will try again."
+		}
+		return ""
+	}
 	// keep the effort valid for the model; a fresh model gets its default.
 	// Routed, the Codex app offers magpie's models' efforts too (#310).
 	settle := func() error {
@@ -145,6 +292,9 @@ func codexIn(at place) *Agent {
 			if err := codexEnableEfforts(path, magpieModels("codex")); err != nil {
 				return err
 			}
+		}
+		if err := keepSubAgentsV1(); err != nil {
+			return err
 		}
 		ms := models()
 		model, effort := get("model"), get("model_reasoning_effort")
@@ -490,6 +640,9 @@ func codexIn(at place) *Agent {
 	// then, for Unwire to go back to
 	unroute := func() (string, error) {
 		forget(at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
+		if err := restoreSubAgentsV1(); err != nil {
+			return "", err
+		}
 		if err := giveTables(); err != nil {
 			return "", err
 		}
@@ -532,6 +685,10 @@ func codexIn(at place) *Agent {
 				return err
 			}
 			if err := dropMirrorFailover(); err != nil {
+				return err
+			}
+			// magpie's multi_agent_v2 override goes with magpie's routing
+			if err := restoreSubAgentsV1(); err != nil {
 				return err
 			}
 			// Codex as installed: OpenAI, its own catalog, its default model
@@ -739,6 +896,12 @@ func codexIn(at place) *Agent {
 			if err := failover(); err != nil {
 				return err
 			}
+			// the multi_agent_v2 override follows the setting on a config
+			// magpie routes, joined beside the sign-in included, and goes
+			// when the setting is off (#141)
+			if err := keepSubAgentsV1(); err != nil {
+				return err
+			}
 			// magpie API on one of Codex's own models, as an older magpie
 			// left it unwired: wired again, as picking it does now (#701)
 			if m := get("model"); api() && !isMagpie(m) && !asProvider() && codexOwnViaMagpie(m) != "" {
@@ -863,6 +1026,9 @@ func codexIn(at place) *Agent {
 		// the app-server behind the Codex app (and every codex TUI) builds
 		// its model list once, at start-up.
 		Notice: func() string {
+			if s := subAgentsV1Notice(); s != "" {
+				return s
+			}
 			if Running(`(^|/)codex( |$)`) {
 				return "Codex builds its model list at start-up — restart the Codex app (and open codex sessions) to see this."
 			}

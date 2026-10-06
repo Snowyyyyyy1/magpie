@@ -313,6 +313,10 @@ type settingsJSON struct {
 	AddrEnv string `json:"addrEnv,omitempty"`
 	// Dir is the data folder beside a portable magpie (#508)
 	Portable bool `json:"portable,omitempty"`
+	// Notice is advice after a change, e.g. a setting that didn't reach the
+	// agent's config (a Settings-page change carries no agents of its own,
+	// so this is where such a change says so)
+	Notice string `json:"notice,omitempty"`
 	// Mac apps that explicitly handle .command files, for resumed sessions.
 	TerminalApps    []terminalChoice `json:"terminalApps,omitempty"`
 	TerminalDefault string           `json:"terminalDefault,omitempty"`
@@ -1125,7 +1129,14 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		s := settingsState()
+		// the setting reaches Codex's config through the agents' sync; say
+		// so when it didn't land (Codex not routed, a failed write, or the
+		// user's own value left in place) rather than implying success
+		if a, err := agent.Find("codex"); err == nil && a.Notice != nil {
+			s.Notice = a.Notice()
+		}
+		writeJSON(rw, s)
 	})
 	// whether Codex and Claude Code are told a model's whole context window
 	// or the working one (settings.FullContext): their lists are written

@@ -280,7 +280,9 @@ func CacheEntries() map[string]map[string]any {
 // subagent's task, so a GPT lead can't hand one to a magpie-served
 // subagent; in V1 the task goes as text (#141). With settings.CodexAgentsV1
 // the OpenAI entries magpie hands Codex say "v1"; nothing else in them
-// changes. Codex keeps what it was handed in models_cache.json, versions
+// changes. Since features.multi_agent_v2 would still win, the setting also
+// has magpie write it off in the Codex config it routes (internal/agent/
+// codex.go). Codex keeps what it was handed in models_cache.json, versions
 // and all, so what the backend itself said is kept aside (originals) and
 // put back when the cache is read again (CacheEntries).
 

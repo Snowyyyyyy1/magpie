@@ -30,14 +30,11 @@ func setAgentsV1(t *testing.T, on bool) {
 	}
 }
 
-// codexAgentsHome is codexHome with magpie's own stash cleared when the test
-// ends (it lives under the temp home, but the file is magpie's own and stays
-// global).
+// codexAgentsHome is codexHome signed in, which routing needs; its config and
+// magpie's own files live under codexHome's temp home.
 func codexAgentsHome(t *testing.T, config string) (home string, read func() string) {
 	t.Helper()
-	home, read = codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, config)
-	t.Cleanup(func() { os.Remove(stashPath()) })
-	return home, read
+	return codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, config)
 }
 
 func modTime(t *testing.T, path string) time.Time {
@@ -91,6 +88,55 @@ func TestCodexAgentsV1WarnsWhenCodexOwnV2IsOn(t *testing.T) {
 			}
 			if n := cx.Notice(); !strings.Contains(n, "multi_agent_v2") || !strings.Contains(n, "turn it off") {
 				t.Fatalf("no notice that Codex's own V2 wins: %q", n)
+			}
+		})
+	}
+}
+
+// The legacy in-file profile's features win over the top level's, as Codex
+// 0.133.0 applied them (base then profile) and as magpie's Check reads
+// profiles.<profile>: multi_agent_v2 is read there in the same four forms, and
+// only the profile the config names decides — one that sets nothing inherits
+// the top level, and one that isn't selected is no input. This is the legacy
+// in-file shape, not modern Codex's --profile + {profile}.config.toml. Still no
+// write (#141).
+func TestCodexAgentsV1WarnsByLegacySelectedProfileFeatures(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		warn         bool
+	}{
+		{"profile bool on over top off", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = false\n\n[profiles.work.features]\nmulti_agent_v2 = true\n", true},
+		{"profile table on over top off", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = false\n\n[profiles.work.features.multi_agent_v2]\nenabled = true\n", true},
+		{"profile inline on over top off", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = false\n\n[profiles.work.features]\nmulti_agent_v2 = { enabled = true, max_concurrent_threads_per_session = 4 }\n", true},
+		{"profile dotted on over top off", "model = \"gpt-5.5\"\nprofile = \"work\"\nfeatures.multi_agent_v2 = false\nprofiles.work.features.multi_agent_v2.enabled = true\n", true},
+		{"profile bool off over top on", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = true\n\n[profiles.work.features]\nmulti_agent_v2 = false\n", false},
+		{"profile table off over top on", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = true\n\n[profiles.work.features.multi_agent_v2]\nenabled = false\n", false},
+		{"profile table enabled omitted inherits top on", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = true\n\n[profiles.work.features.multi_agent_v2]\nmax_concurrent_threads_per_session = 4\n", true},
+		{"profile sets nothing inherits top off", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[profiles.work.features]\nfoo = true\n", false},
+		{"profile string true is not a bool", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = false\n\n[profiles.work.features]\nmulti_agent_v2 = \"true\"\n", false},
+		{"profile string true over top on inherits", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[features]\nmulti_agent_v2 = true\n\n[profiles.work.features]\nmulti_agent_v2 = \"true\"\n", true},
+		{"unselected profile ignored", "model = \"gpt-5.5\"\nprofile = \"work\"\n\n[profiles.other.features]\nmulti_agent_v2 = true\n", false},
+		{"no active profile ignored", "model = \"gpt-5.5\"\n\n[profiles.work.features]\nmulti_agent_v2 = true\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, read := codexAgentsHome(t, tc.config)
+			cx := codex(home)
+			route(t, cx, read)
+			setAgentsV1(t, true)
+			before := read()
+			if err := cx.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if after := read(); after != before {
+				t.Fatalf("magpie wrote to the config:\n%s\n→\n%s", before, after)
+			}
+			n := cx.Notice()
+			if tc.warn {
+				if !strings.Contains(n, "multi_agent_v2") || !strings.Contains(n, "turn it off") {
+					t.Fatalf("no notice that Codex's own V2 wins: %q", n)
+				}
+			} else if strings.Contains(n, "multi_agent_v2") {
+				t.Fatalf("a warning with Codex's own V2 off: %q", n)
 			}
 		})
 	}

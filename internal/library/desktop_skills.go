@@ -30,7 +30,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -40,10 +40,7 @@ const desktopManifest = "manifest.json"
 // Desktop has, in its own folder and Claude-3p's alike: each one with a
 // manifest.json or the plugin's plugin.json.
 func desktopSkillRoots(desktopDir string) []string {
-	dirs := []string{desktopDir, filepath.Dir(agent.DesktopConfig3p(home()))}
-	if d, err := os.UserConfigDir(); err == nil {
-		dirs = append(dirs, filepath.Join(d, "Claude"), filepath.Join(d, "Claude-3p"))
-	}
+	dirs := append([]string{desktopDir}, desktopdir.Here().All()...)
 	var out []string
 	seen := map[string]bool{}
 	for _, d := range dirs {
@@ -75,20 +72,9 @@ func isFile(p string) bool {
 }
 
 // desktopCopy puts a copy of the library's skill at p, its mark keeping
-// the hash of what was copied.
+// the hash of what was copied (markCopy).
 func desktopCopy(p, name string) error {
-	if err := copyIn(p, name); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(filepath.Join(p, marker), os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(f, "hash %s\n", hashDir(p))
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return copyIn(p, name)
 }
 
 // desktopEdited is whether magpie's copy at p was changed since it was

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // versionedRTK is an rtk whose version is in the file VERSION names, with
@@ -69,7 +71,7 @@ func TestRTKUpgradeBrew(t *testing.T) {
 	h := sandbox(t)
 	latestServer(t, "v0.50.0")
 	cellar := filepath.Join(h, "brew", "Cellar", "rtk", "0.28.2", "bin")
-	write(t, filepath.Join(cellar, "rtk"), strings.ReplaceAll(versionedRTK, "VERSION", filepath.Join(cellar, "VERSION")))
+	testenv.Program(t, filepath.Join(cellar, "rtk"), strings.ReplaceAll(versionedRTK, "VERSION", filepath.Join(cellar, "VERSION")))
 	write(t, filepath.Join(cellar, "VERSION"), "0.28.2")
 	bin := filepath.Join(h, "brew", "bin")
 	os.MkdirAll(bin, 0o755)
@@ -77,12 +79,10 @@ func TestRTKUpgradeBrew(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Homebrew so far has 0.49.0
-	write(t, filepath.Join(bin, "brew"), `#!/bin/sh
+	testenv.Program(t, filepath.Join(bin, "brew"), `#!/bin/sh
 [ "$*" = "upgrade rtk" ] || exit 2
 echo 0.49.0 > "`+filepath.Join(cellar, "VERSION")+`"
 `)
-	os.Chmod(filepath.Join(cellar, "rtk"), 0o755)
-	os.Chmod(filepath.Join(bin, "brew"), 0o755)
 	t.Setenv("PATH", bin)
 
 	v := ReadRTK()
@@ -122,15 +122,13 @@ func TestRTKUpgradeScript(t *testing.T) {
 	h := sandbox(t)
 	latestServer(t, "v0.50.0")
 	dir := filepath.Join(h, ".local", "bin")
-	write(t, filepath.Join(dir, "rtk"), strings.ReplaceAll(versionedRTK, "VERSION", filepath.Join(dir, "VERSION")))
+	testenv.Program(t, filepath.Join(dir, "rtk"), strings.ReplaceAll(versionedRTK, "VERSION", filepath.Join(dir, "VERSION")))
 	write(t, filepath.Join(dir, "VERSION"), "0.40.1")
-	os.Chmod(filepath.Join(dir, "rtk"), 0o755)
 	tools := filepath.Join(h, "tools")
 	// curl hands over an installer that puts 0.50.0 in RTK_INSTALL_DIR
-	write(t, filepath.Join(tools, "curl"), `#!/bin/sh
+	testenv.Program(t, filepath.Join(tools, "curl"), `#!/bin/sh
 echo 'echo 0.50.0 > "$RTK_INSTALL_DIR/VERSION"'
 `)
-	os.Chmod(filepath.Join(tools, "curl"), 0o755)
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+"/bin"+string(os.PathListSeparator)+"/usr/bin")
 
 	v := ReadRTK()
@@ -210,15 +208,14 @@ func TestRTKWaitsForWinget(t *testing.T) {
 	h := sandbox(t)
 	latestServer(t, "v0.51.0")
 	links := filepath.Join(h, "AppData", "Local", "Microsoft", "WinGet", "Links")
-	write(t, filepath.Join(links, "rtk"), strings.ReplaceAll(versionedRTK, "VERSION", filepath.Join(links, "VERSION")))
+	testenv.Program(t, filepath.Join(links, "rtk"), strings.ReplaceAll(versionedRTK, "VERSION", filepath.Join(links, "VERSION")))
 	write(t, filepath.Join(links, "VERSION"), "0.50.0")
-	os.Chmod(filepath.Join(links, "rtk"), 0o755)
 	has, broken := filepath.Join(h, "winget-has"), filepath.Join(h, "winget-broken")
 	write(t, has, "0.50.0")
 	tools := filepath.Join(h, "tools")
 	// winget show, as Windows in Chinese prints it; winget upgrade installs
 	// what it has, when that is newer, and says when it isn't
-	write(t, filepath.Join(tools, "winget"), `#!/bin/sh
+	testenv.Program(t, filepath.Join(tools, "winget"), `#!/bin/sh
 [ -e "`+broken+`" ] && { echo "Failed when searching source: winget"; exit 1; }
 v=$(/bin/cat "`+has+`")
 case "$1" in
@@ -229,7 +226,6 @@ upgrade)
 *) exit 2 ;;
 esac
 `)
-	os.Chmod(filepath.Join(tools, "winget"), 0o755)
 	t.Setenv("PATH", links+string(os.PathListSeparator)+tools)
 	up := upgraderOf
 	upgraderOf = func(string) []string {

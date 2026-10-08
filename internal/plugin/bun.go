@@ -100,7 +100,7 @@ func Bun(ctx context.Context) (string, error) {
 	defer bunMu.Unlock()
 	v := inUseLocked()
 	exe := bunExeOf(v)
-	if _, err := os.Stat(exe); err == nil {
+	if haveBun(v) {
 		return exe, nil
 	}
 	if err := downloadBun(ctx, v, exe); err != nil {
@@ -228,7 +228,7 @@ var bunCommand = func(ctx context.Context, bun, dir string, args ...string) *exe
 	cmd := command(ctx, bun, args...)
 	cmd.Dir = dir
 	cmd.Env = append(env(), "BUN_INSTALL_CACHE_DIR="+filepath.Join(filepath.Dir(catalog.CachePath()), "bun", "install-cache"))
-	cmd.Env = append(cmd.Env, caEnv(cmd.Env)...)
+	cmd.Env = append(cmd.Env, caEnv(cmd.Env, dir)...)
 	cmd.Env = append(cmd.Env, registryEnv(cmd.Env)...)
 	return cmd
 }

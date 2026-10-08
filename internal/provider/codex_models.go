@@ -280,13 +280,18 @@ func (a *Account) Levels(model string) (levels []string, ok bool) {
 	return nil, false
 }
 
-// codexPoolLevels gives each of ms — the list of the account Codex is
-// signed in to — the reasoning levels any other account on gives it too:
-// the provider's levels are what its accounts together take, so a Free
-// account signed in, whose plan lacks high, doesn't lower the request a
-// Plus one beside it answers (#520); the gateway sends each account only
-// what its own list takes (Account.Levels) first.
-func codexPoolLevels(ms []catalog.Model) []catalog.Model {
+// codexPoolModels is ms — the list of the account Codex is signed in to —
+// with what the other accounts on add to it. A model only another account's
+// plan has joins it (Raven on Discord: Codex signed in to a Free account
+// beside a Pro 5x one, and the codex provider listed only the Free plan's
+// three), right after the model before it in that account's list, as
+// Antigravity's pool does (mergeAntigravityModels). And each model takes
+// the reasoning levels any of them gives it: the provider's levels are what
+// its accounts together take, so a Free account signed in, whose plan lacks
+// high, doesn't lower the request a Plus one beside it answers (#520). The
+// gateway sends each account only the models and levels its own list has
+// (Account.Lists, Account.Levels) first.
+func codexPoolModels(ms []catalog.Model) []catalog.Model {
 	var lists [][]catalog.Model
 	for _, l := range Logins("codex") {
 		if l.Active || !l.On {
@@ -300,26 +305,30 @@ func codexPoolLevels(ms []catalog.Model) []catalog.Model {
 		return ms
 	}
 	out := slices.Clone(ms)
-	for i, m := range out {
-		if len(m.Efforts) == 0 {
-			continue
-		}
-		efforts := slices.Clone(m.Efforts)
-		for _, live := range lists {
-			for _, o := range live {
-				if o.ID != m.ID {
-					continue
-				}
-				for _, e := range o.Efforts {
-					if !slices.Contains(efforts, e) {
-						efforts = append(efforts, e)
-					}
+	for _, live := range lists {
+		next := 0
+		for _, o := range live {
+			i := slices.IndexFunc(out, func(m catalog.Model) bool { return m.ID == o.ID })
+			if i < 0 {
+				o.Efforts = slices.Clone(o.Efforts)
+				out = slices.Insert(out, next, o)
+				next++
+				continue
+			}
+			next = max(next, i+1)
+			if len(out[i].Efforts) == 0 {
+				continue
+			}
+			efforts := slices.Clone(out[i].Efforts)
+			for _, e := range o.Efforts {
+				if !slices.Contains(efforts, e) {
+					efforts = append(efforts, e)
 				}
 			}
-		}
-		if len(efforts) > len(m.Efforts) {
-			slices.SortStableFunc(efforts, func(a, b string) int { return levelRank(a) - levelRank(b) })
-			out[i].Efforts = efforts
+			if len(efforts) > len(out[i].Efforts) {
+				slices.SortStableFunc(efforts, func(a, b string) int { return levelRank(a) - levelRank(b) })
+				out[i].Efforts = efforts
+			}
 		}
 	}
 	return out

@@ -196,6 +196,9 @@ type agentJSON struct {
 	// started with (agent.Stale), for the line under its name
 	Source string `json:"source,omitempty"`
 	Stale  int    `json:"stale,omitempty"`
+	// StaleCopies: those copies, each with what it is and when it
+	// started, for the opened row to say which is left to reopen and how
+	StaleCopies []agent.StaleCopy `json:"staleCopies,omitempty"`
 	// Joined: connected with its own models still in its list (Codex
 	// signed in with ChatGPT, agent.Agent.Join)
 	Joined bool `json:"joined,omitempty"`
@@ -994,6 +997,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
 		in.Port = cur.Port                               // set on its own (port below), which moves the gateway
+		in.CORSOrigins = cur.CORSOrigins                 // set on its own (cors below)
 		in.GitHubToken = cur.GitHubToken                 // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
@@ -1465,6 +1469,27 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// the web pages that may call the gateway from a browser (#1051), as
+	// their origins; none takes them all away
+	mux.HandleFunc("POST /api/settings/cors", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Origins []string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		origins, err := settings.CleanOrigins(in.Origins)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.CORSOrigins = origins
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// the gateway's port (Magic_zero on Discord), set on its own: it moves
 	// the gateway and every agent connected to it
 	mux.HandleFunc("POST /api/settings/port", func(rw http.ResponseWriter, r *http.Request) {
@@ -1668,7 +1693,8 @@ func state() stateJSON {
 		aj.Drift = a.Drift()
 		aj.Wired = a.Wired()
 		if aj.Wired {
-			aj.Stale = a.Stale()
+			aj.StaleCopies = a.StaleCopies()
+			aj.Stale = len(aj.StaleCopies)
 			aj.Joined = a.Joined != nil && a.Joined()
 		} else {
 			aj.Source = a.Source()

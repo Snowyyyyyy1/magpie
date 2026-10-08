@@ -18,8 +18,8 @@ const quotas = [
   { provider: "kimi", name: "Kimi Code 的一个名字很长很长的订阅 with a long name", icon: "kimi-color", windows: [{ name: "Weekly", used: 30 }] },
 ];
 
-function serve(lang, posts, fail) {
-  const settings = { theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd", usageOrder: [], panelUsageHidden: ["kimi"] };
+function serve(lang, posts, fail, saved = {}) {
+  const settings = { theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd", usageOrder: [], panelUsageHidden: ["kimi"], ...saved };
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -162,12 +162,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
       await page.waitForFunction(() => !document.querySelector('#panelQuota .pq-card[data-card="deepseek"]'));
 
-      // the Usage page keeps every card, in the shared order
+      // the Usage page keeps every card, in the shared order. The window reads
+      // the settings saved above from magpie, as it does: set into state by hand,
+      // its own load could answer after and put the first order back
       const win = await context.newPage();
       win.on("pageerror", (e) => errors.push(e.message));
-      await win.route("**/*", serve(lang, [], {}));
+      await win.route("**/*", serve(lang, [], {}, { usageOrder: ["deepseek", "codex", "claude", "kimi"], panelUsageHidden: ["deepseek"] }));
       await win.goto("http://magpie.test/?view=usage&tab=usage");
-      await win.evaluate((s) => { state.settings = { ...state.settings, ...s }; renderQuotas(); }, { usageOrder: ["deepseek", "codex", "claude", "kimi"], panelUsageHidden: ["deepseek"] });
       await win.waitForFunction(() => document.querySelectorAll("#subscriptionUsage > [data-key]").length >= 4);
       assert.deepEqual(await win.evaluate(() => [...new Set([...document.querySelectorAll("#subscriptionUsage > [data-key]")].map((c) => c.dataset.key))]), ["deepseek", "codex", "claude", "kimi"]);
 

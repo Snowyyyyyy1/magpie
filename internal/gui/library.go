@@ -366,8 +366,12 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ServerAgents(in.Name, in.Agents)
 		case "servers/agents-all":
 			res, err = library.EveryServerAgents(in.Agents, in.On)
+		case "servers/agents-some":
+			res, err = library.SomeServersAgents(in.Names, in.Agents, in.On)
 		case "servers/remove":
 			res, err = library.RemoveServer(in.Name)
+		case "servers/remove-all":
+			res, err = library.RemoveServers(in.Names)
 		case "servers/import":
 			res, err = library.ImportServer(in.Name)
 		case "skills/install":
@@ -392,6 +396,10 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.GroupSkills(in.Old, in.Name, in.Names)
 		case "skills/ungroup":
 			res, err = library.UngroupSkills(in.Name, in.Names)
+		case "skills/add-new":
+			res, err = library.AddNewSkills(in.Names)
+		case "skills/ignore-new":
+			err = library.IgnoreNewSkills(in.Names)
 		case "skills/import":
 			res, err = library.ImportSkill(in.Name)
 		case "skills/import-all":

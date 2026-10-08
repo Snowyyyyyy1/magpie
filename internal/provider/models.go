@@ -135,9 +135,13 @@ func (p Provider) Listed() (time.Time, bool) {
 
 // live is the list last fetched from the vendor. A plugin's provider has
 // none: its models are what the plugin lists now, and a built-in moved
-// onto it left its own last list under the same id.
+// onto it left its own last list under the same id. A preset with no list
+// ignores old fetched models too, unless a region or explicit URL lists them.
 func (p Provider) live() ([]catalog.Model, time.Time, bool) {
 	if p.IsPlugin() {
+		return nil, time.Time{}, false
+	}
+	if pr := Preset(p.Preset); p.Account == nil && pr != nil && pr.NoList && strings.TrimSpace(p.ModelsURL) == "" && !p.listRegion(pr) {
 		return nil, time.Time{}, false
 	}
 	type live struct {
@@ -694,7 +698,7 @@ func anyImageInput(a, b *bool) *bool {
 // Serves reports whether key k can be asked for model: false only when the
 // vendor's lists say another of the provider's keys sees it and k doesn't.
 func (p Provider) Serves(k KeyAccount, model string) bool {
-	live, _, ok := catalog.Live(p.ID)
+	live, _, ok := p.live()
 	if !ok {
 		return true
 	}
@@ -1079,8 +1083,8 @@ type Entry struct {
 	// unless the group names its own (Group.Levels).
 	Shared []string `json:"-"`
 	// Reasoning is set on a model that thinks, levels or not: one with a
-	// thinking switch alone has it and no Efforts (a group's: every
-	// member thinks).
+	// thinking switch alone has it and no Efforts (a group's: a member
+	// thinks).
 	Reasoning bool `json:"reasoning,omitempty"`
 	// AgentsV2 is set on a model offering Codex's Ultra that no ChatGPT
 	// account answers for (a group's: none of its members): Codex is told
@@ -1352,6 +1356,9 @@ func (p Provider) ContextOf(model string) int {
 func (p Provider) ReplyLimit(m catalog.Model) int {
 	return p.replyLimit(m, settings.Load())
 }
+
+// ReplyLimitIn is ReplyLimit from settings s already read.
+func (p Provider) ReplyLimitIn(m catalog.Model, s settings.Settings) int { return p.replyLimit(m, s) }
 
 func (p Provider) replyLimit(m catalog.Model, s settings.Settings) int {
 	output := m.Output

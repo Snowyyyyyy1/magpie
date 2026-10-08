@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // A request with output_config.format runs Claude Code with --json-schema;
@@ -32,7 +33,7 @@ while read -r line; do
   echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"color":"blue"}}'
 done
 `
-	os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755)
+	testenv.Program(t, filepath.Join(dir, "claude"), script)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	s := New()
@@ -70,8 +71,8 @@ func TestClaudeSchemaAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(req.Schema), `"color"`) {
-		t.Fatalf("schema: %s", req.Schema)
+	if !strings.Contains(string(req.Format.schema()), `"color"`) {
+		t.Fatalf("schema: %s", req.Format.schema())
 	}
 	var built struct {
 		OutputConfig struct {

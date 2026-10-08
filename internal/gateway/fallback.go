@@ -15,6 +15,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -97,14 +98,12 @@ func (c candidate) isOpenRouterFree() bool {
 }
 
 // restID is the candidate's model's own rest key: a free OpenRouter
-// model's, whose rate limit is its free-tier limit, and a subscription's,
-// out of a pool of its allowance that counts some models only (pooled).
-// An account-level rest stays on restKey.
+// model's, whose rate limit is its free-tier limit, a subscription's, out
+// of a pool of its allowance that counts some models only (pooled), and
+// any key's or account's model its vendor said it doesn't serve it
+// (modelRefused). An account-level rest stays on restKey.
 func (c candidate) restID() string {
-	if c.isOpenRouterFree() || c.p.Account != nil {
-		return c.restKey() + "/" + c.model
-	}
-	return c.restKey()
+	return c.restKey() + "/" + c.model
 }
 
 // pooled says whether the candidate's subscription, refused for its
@@ -709,6 +708,22 @@ var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billi
 // key, or this way — words another provider, or key, may not answer with.
 var unservedWords = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|模型.{0,12}(不存在|不支持|无权|未开通)`)
 
+// modelRefused says the vendor turned the request away over its model
+// alone — not one this key's plan, or this key, may use: SenseNova's 403
+// "model is not available in the current token plan" for
+// deepseek-v4.1-flash, while the same key serves deepseek-v4-flash
+// (#1235). The key or account isn't at fault, so only its model rests,
+// and its other models are asked as before. A refusal that also says
+// quota, credit or a rate limit is about the account, and rests it.
+func modelRefused(status int, body []byte) bool {
+	switch status {
+	case 400, 403, 404, 422:
+	default:
+		return false
+	}
+	return unservedWords.Match(body) && !quotaWords.Match(body) && !refusedWords.Match(body)
+}
+
 // refusedWords are how a vendor says it won't take requests from this
 // client at all — WorkBuddy's "Illegal API invocation from an unapproved
 // channel" to a chat opening with another agent's own system prompt — a
@@ -733,6 +748,34 @@ var shapeWords = regexp.MustCompile(`(?i)failed to deserialize|unknown (item |co
 func shapeRefused(status int, body []byte) bool {
 	return (status == 400 || status == 422) && shapeWords.Match(body) &&
 		!quotaWords.Match(body) && !unservedWords.Match(body) && !refusedWords.Match(body)
+}
+
+// protectionWords are how the ChatGPT backend answers a long Codex
+// conversation it won't take as it is: 502 "response protection is
+// unavailable" (vs on Discord, 0.1.1108). It comes back the same for the
+// same history on every account and model the backend serves, and the
+// history as plain text is answered, so it is about the request, not the
+// account: asked again there, it only drains the accounts' allowances.
+var protectionWords = regexp.MustCompile(`(?i)response protection is unavailable`)
+
+// protectionRefused says the vendor turned the request's content away
+// with protectionWords: the account is not at fault, and none of its
+// provider's other accounts or models is asked the same.
+func protectionRefused(status int, body []byte) bool {
+	return status >= 400 && protectionWords.Match(body)
+}
+
+// elsewhere is, of the candidates left, those not at c's provider, whose
+// every account and model the same request reaches the same backend
+// through.
+func elsewhere(left []candidate, c candidate) []candidate {
+	var out []candidate
+	for _, x := range left {
+		if x.p.ID != c.p.ID {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // retryable says whether another provider may do better with a request
@@ -762,7 +805,7 @@ func retryable(status int, body []byte) bool {
 // vendor turned away as it reads, would fail the same at the next asked:
 // nobody rests for it.
 func lateRests(msg string) bool {
-	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg)
+	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg) && !protectionWords.MatchString(msg)
 }
 
 // unsaidMargin is how far past a model's window a request's estimate
@@ -966,6 +1009,10 @@ type holdWriter struct {
 	// to be read event by event
 	after []byte
 	whole bool // a reply that isn't streamed, held whole until release
+	// wholeUnsure: held whole only as the agent has a stream's headers,
+	// under a type that says neither JSON nor a stream: the reply's first
+	// bytes say whether it streams after all (Write)
+	wholeUnsure bool
 
 	// buffered: the vendor said it holds the reply back for safety checks,
 	// which may end in a refusal: held longer (holdBuffered)
@@ -987,6 +1034,10 @@ type holdWriter struct {
 	// reasoning keeps the agent from its idle timeout with SSE comments
 	// meanwhile (#751)
 	alive *keptAlive
+	// notes are the headers magpie says of the try (noteMember), set
+	// under mu: all keepAlive sends of the try's before it has its status,
+	// as until then the try is still writing header, with no lock
+	notes http.Header
 
 	first firstToken // when its first content and text came (#196)
 
@@ -1026,6 +1077,18 @@ func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
 
 func (h *holdWriter) Header() http.Header { return h.header }
 
+// note sets a header magpie says of the try, which keepAlive may send
+// from watch's goroutine before the try has its status.
+func (h *holdWriter) note(k, v string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.header.Set(k, v)
+	if h.notes == nil {
+		h.notes = http.Header{}
+	}
+	h.notes.Set(k, v)
+}
+
 func (h *holdWriter) WriteHeader(code int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1047,6 +1110,13 @@ func (h *holdWriter) writeHeader(code int) {
 	if h.hold && strings.HasPrefix(h.header.Get("Content-Type"), "application/json") {
 		// read whole for a refusal once the try is over (settle)
 		h.whole = true
+		return
+	}
+	if h.hold && h.alive != nil && h.alive.sent {
+		// any other reply, once the agent has a stream's headers: held
+		// whole for release to send as that stream, unless it begins as
+		// one
+		h.whole, h.wholeUnsure = true, true
 		return
 	}
 	h.pass()
@@ -1080,6 +1150,25 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	h.see(b)
 	h.first.see(b)
 	h.heard = time.Now()
+	if h.wholeUnsure {
+		head := append(h.held.Bytes()[:h.held.Len():h.held.Len()], b...)
+		if sse, sure := sseStart(head); sure {
+			h.wholeUnsure = false
+			if sse {
+				// a stream under a type that doesn't say so: through as it
+				// comes, with what was held of its start
+				h.whole = false
+				h.held.Reset()
+				h.pass()
+				h.refusalAfter(head)
+				h.sent(head)
+				if _, err := h.w.Write(head); err != nil {
+					return 0, err
+				}
+				return len(b), nil
+			}
+		}
+	}
 	if h.first.first != 0 || h.passing {
 		h.refusalAfter(b)
 	}
@@ -1092,6 +1181,25 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 		h.scan()
 	}
 	return n, err
+}
+
+// sseStart reports whether a body that begins with head is server-sent
+// events, by the field its first line begins with, and whether head is
+// enough to tell.
+func sseStart(head []byte) (sse, sure bool) {
+	head = bytes.TrimLeft(head, " \t\r\n")
+	if len(head) == 0 {
+		return false, false
+	}
+	for _, field := range []string{"data:", "event:", "id:", "retry:", ":"} {
+		if bytes.HasPrefix(head, []byte(field)) {
+			return true, true
+		}
+		if len(head) < len(field) && strings.HasPrefix(field, string(head)) {
+			return false, false
+		}
+	}
+	return false, true
 }
 
 // streamEnds are how each protocol's stream says it is over, as they can
@@ -1244,10 +1352,17 @@ func (h *holdWriter) keepAlive() {
 		return
 	}
 	if !a.sent {
+		// the try's header is whole once it has its status (WriteHeader,
+		// under mu); before, the vendor's are still being copied into it
+		// from the try's goroutine, and only magpie's notes are read
+		src := h.header
+		if h.status == 0 {
+			src = h.notes
+		}
 		dst := h.w.Header()
-		for k, v := range h.header {
+		for k, v := range src {
 			if k != resetsHeader && k != refusedHeader && k != "Content-Length" {
-				dst[k] = v
+				dst[k] = slices.Clone(v)
 			}
 		}
 		dst.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -1380,6 +1495,14 @@ func (h *holdWriter) settle() {
 	}
 	if msg, ok := refusedReply(h.held.Bytes()); ok {
 		h.failure, h.failMsg, h.refused = refusedStatus, msg, true
+		return
+	}
+	if h.alive != nil && h.alive.sent && h.status < 400 && wholeEvents(h.alive.proto, h.held.Bytes()) == nil {
+		// a 200 that is no reply of the protocol's, once the agent has a
+		// stream's headers: it can't go as that stream, so it failed, as
+		// a translated reply that didn't stream does, for the next to
+		// answer
+		h.failure, h.failMsg = http.StatusBadGateway, "did not stream: "+provider.APIError(h.held.Bytes(), "unexpected reply")
 	}
 }
 
@@ -1405,9 +1528,21 @@ func (h *holdWriter) release() {
 		return
 	}
 	if h.alive != nil && h.alive.sent && !h.stream {
-		// an error status, once the agent has a stream: told as its error
 		h.passing = true
-		streamError(h.w, h.alive.proto, h.status, provider.APIError(h.held.Bytes(), http.StatusText(h.status)))
+		switch {
+		case h.failure != 0:
+			// a 200 that is no reply of the protocol's (settle)
+			who := cmp.Or(h.header.Get(providerHeader), "the provider")
+			streamError(h.w, h.alive.proto, h.failure, who+" "+h.failMsg)
+		case h.status >= 400:
+			// an error status, once the agent has a stream: told as its error
+			streamError(h.w, h.alive.proto, h.status, provider.APIError(h.held.Bytes(), http.StatusText(h.status)))
+		default:
+			// a reply given whole by a vendor that ignored stream:true,
+			// after the agent was kept alive: sent as the stream it asked
+			// for, not as an error "OK" with the reply in it
+			wholeAsStream(h.w, h.alive.proto, h.held.Bytes())
+		}
 		return
 	}
 	h.pass()
@@ -1504,9 +1639,10 @@ func (h *holdWriter) keepQuiet() {
 		return // a stream stuck this long is left for a timeout to end
 	}
 	if !h.passing {
-		// only a stream, or no reply yet to an agent that asked for one;
+		// only a stream, no reply yet to an agent that asked for one, or
+		// one yet to say whether it streams (wholeUnsure), none of it sent;
 		// an error held is told as the stream's own once the 200 is out
-		if h.hold && h.failure == 0 && !h.whole && h.status < 400 && (h.stream || h.status == 0) {
+		if h.hold && h.failure == 0 && (!h.whole || h.wholeUnsure) && h.status < 400 && (h.stream || h.status == 0 || h.wholeUnsure) {
 			h.keepAlive()
 		}
 		return

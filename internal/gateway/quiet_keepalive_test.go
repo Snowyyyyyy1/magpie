@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,13 @@ func quietOn(t *testing.T, id, before, after string, heard <-chan struct{}) *ato
 // took.
 func askChat(t *testing.T, s *Server, model string, heard chan struct{}) (int, string, time.Duration) {
 	t.Helper()
+	return askChatAfter(t, s, model, heard, "")
+}
+
+// askChatAfter is askChat closing heard at the first keepalive after after
+// (readQuiet).
+func askChatAfter(t *testing.T, s *Server, model string, heard chan struct{}, after string) (int, string, time.Duration) {
+	t.Helper()
 	gw := httptest.NewServer(s.Handler())
 	t.Cleanup(gw.Close)
 	began := time.Now()
@@ -75,20 +83,42 @@ func askChat(t *testing.T, s *Server, model string, heard chan struct{}) (int, s
 	}
 	headers := time.Since(began)
 	defer resp.Body.Close()
+	return resp.StatusCode, readQuiet(resp.Body, heard, after), headers
+}
+
+// readQuiet reads a stream to its end, closing heard at its first
+// keepalive once after has come in it. A keepalive may come before the
+// vendor's first words as well, the vendor slow to send them, or the try
+// slow to read them, with the stream held and nothing of it sent: that is
+// the held stream's (TestSilentHeldStreamKeptAlive), and says nothing of a
+// quiet after them.
+func readQuiet(r io.Reader, heard chan struct{}, after string) string {
 	var once sync.Once
 	var body strings.Builder
-	rd := bufio.NewReader(resp.Body)
+	rd := bufio.NewReader(r)
 	for {
 		line, err := rd.ReadString('\n')
 		body.WriteString(line)
-		if strings.HasPrefix(line, ": keepalive") {
+		if strings.HasPrefix(line, ": keepalive") && strings.Contains(body.String(), after) {
 			once.Do(func() { close(heard) })
 		}
 		if err != nil {
-			break
+			return body.String()
 		}
 	}
-	return resp.StatusCode, body.String(), headers
+}
+
+// aliveAfter is where body's first keepalive after after is, or -1.
+func aliveAfter(body, after string) int {
+	i := strings.Index(body, after)
+	if i < 0 {
+		return -1
+	}
+	j := strings.Index(body[i:], ": keepalive")
+	if j < 0 {
+		return -1
+	}
+	return i + j
 }
 
 // A vendor that sent its 200 and response.created, then nothing while it
@@ -115,15 +145,16 @@ func TestSilentHeldStreamKeptAlive(t *testing.T) {
 // One quiet mid-reply, its first words sent: a translated reply's client
 // was kept alive only as its vendor sent something, so a vendor that said
 // nothing at all left it to the proxy's timeout, which reset the stream
-// (#947, "INTERNAL_ERROR; received from peer").
+// (#947, "INTERNAL_ERROR; received from peer"). The keepalive this is
+// about is the one after them (readQuiet).
 func TestQuietStreamMidReplyKeptAlive(t *testing.T) {
 	fresh(t)
 	quietFast(t)
 	heard := make(chan struct{})
 	timedOut := quietOn(t, "fixture", quietCreated+quietDelta("hel"), quietDelta("lo")+quietDone, heard)
-	code, body, _ := askChat(t, New(), "fixture/gpt-test", heard)
-	alive := strings.Index(body, ": keepalive")
-	if timedOut.Load() || code != 200 || alive < 0 || !strings.Contains(body[:alive], "hel") || !strings.Contains(body[alive:], `"lo"`) || !strings.Contains(body, "[DONE]") {
+	code, body, _ := askChatAfter(t, New(), "fixture/gpt-test", heard, "hel")
+	alive := aliveAfter(body, "hel")
+	if timedOut.Load() || code != 200 || alive < 0 || !strings.Contains(body[alive:], `"lo"`) || !strings.Contains(body, "[DONE]") {
 		t.Fatalf("timed out %v: %d %q", timedOut.Load(), code, body)
 	}
 }
@@ -170,8 +201,15 @@ func TestQuietKeptAliveOnlySoLong(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body) // the vendor goes on after 3s
-	if n := strings.Count(string(b), ": keepalive"); n == 0 || n > 8 {
-		t.Fatalf("%d keepalives in 3s, kept for 200ms: %q", n, b)
+	// counted from its first words, as readQuiet: the held stream's before
+	// them are kept for 200ms of their own
+	body := string(b)
+	i, j := strings.Index(body, "hel"), strings.Index(body, `"lo"`)
+	if i < 0 || j < i {
+		t.Fatalf("%q", body)
+	}
+	if n := strings.Count(body[i:j], ": keepalive"); n == 0 || n > 8 {
+		t.Fatalf("%d keepalives in 3s, kept for 200ms: %q", n, body)
 	}
 }
 
@@ -210,8 +248,10 @@ func TestQuietStreamsKeptAliveEveryProtocol(t *testing.T) {
 				quietFast(t)
 				heard := make(chan struct{})
 				before, after := c.start(""), c.text("lo")+c.end("")
+				said := "" // what the agent has before the quiet
 				if mid {
 					before += c.text("hel")
+					said = "hel"
 				}
 				var timedOut atomic.Bool
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,25 +288,50 @@ func TestQuietStreamsKeptAliveEveryProtocol(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer resp.Body.Close()
-				var once sync.Once
-				var body strings.Builder
-				rd := bufio.NewReader(resp.Body)
-				for {
-					line, err := rd.ReadString('\n')
-					body.WriteString(line)
-					if strings.HasPrefix(line, ": keepalive") {
-						once.Do(func() { close(heard) })
-					}
-					if err != nil {
-						break
-					}
-				}
-				b := body.String()
-				alive := strings.Index(b, ": keepalive")
-				if timedOut.Load() || resp.StatusCode != 200 || alive < 0 || !strings.Contains(b[alive:], "lo") || mid && !strings.Contains(b[:alive], "hel") {
+				b := readQuiet(resp.Body, heard, said)
+				alive := aliveAfter(b, said)
+				if timedOut.Load() || resp.StatusCode != 200 || alive < 0 || !strings.Contains(b[alive:], `"lo"`) {
 					t.Fatalf("timed out %v: %d %q", timedOut.Load(), resp.StatusCode, b)
 				}
 			})
 		}
+	}
+}
+
+// A vendor slow to answer at all gets its stream's agent kept alive from
+// watch's goroutine while the try, once the vendor answers, copies the
+// vendor's headers in: keepAlive reads only magpie's notes until the try
+// has its status, so the two never touch one map (a race, and in a build
+// without -race "concurrent map iteration and map write").
+func TestKeepAliveBeforeTheVendorsHeaders(t *testing.T) {
+	quietFast(t)
+	rec := httptest.NewRecorder()
+	h := newHoldWriter(rec, true)
+	h.streams, h.alive = true, &keptAlive{proto: provider.Responses}
+	r := httptest.NewRequest("POST", "/v1/responses", nil)
+	noteMember(h, r, provider.Provider{ID: "q"}, "m")
+	end := h.watch()
+	// the vendor's headers come in as passthrough copies them, the first
+	// comment going out meanwhile
+	deadline := time.Now().Add(5 * time.Second)
+	for i := 0; ; i++ {
+		h.Header().Set("X-Vendor", strconv.Itoa(i))
+		h.mu.Lock()
+		sent := h.alive.sent
+		h.mu.Unlock()
+		if sent && i > 100 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	end()
+	if !h.alive.sent {
+		t.Fatal("no comment went out")
+	}
+	if got := rec.Header().Get(providerHeader); got != "q" {
+		t.Fatalf("the stream's headers before its reply lack magpie's notes: %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), ": keepalive") {
+		t.Fatalf("body: %q", rec.Body.String())
 	}
 }

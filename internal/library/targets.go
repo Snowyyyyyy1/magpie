@@ -9,6 +9,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/desktopdir"
 )
 
 // Target is where one agent keeps each of the three: an empty path is
@@ -347,15 +348,14 @@ func wslTargetOf(a *agent.Agent) *Target {
 // apps are what the library can give MCP servers to that aren't agents
 // magpie sets up: known by the folder they keep their settings in.
 func apps() []*agent.Agent {
-	d, err := os.UserConfigDir()
-	if err != nil {
-		return nil
-	}
-	// Desktop only ever run in its 3p mode has no Claude folder, only
-	// Claude-3p: its file is the one there
-	dir := filepath.Join(d, "Claude")
-	if p := agent.DesktopConfig3p(home()); !isDir(dir) && isDir(filepath.Dir(p)) {
-		dir = filepath.Dir(p)
+	// Desktop's own folder (%APPDATA%\Claude on Windows, the MSIX
+	// package's for a packaged Desktop, which doesn't see a file written
+	// into %APPDATA%). Desktop only ever run in its 3p mode has no Claude
+	// folder, only Claude-3p: its file is the one there
+	d := desktopdir.Here()
+	dir := d.Data
+	if !isDir(dir) && isDir(d.ThreeP) {
+		dir = d.ThreeP
 	}
 	return []*agent.Agent{
 		{ID: "claude-desktop", Name: "Claude Desktop", Icon: "claude-color", Dir: dir, Path: filepath.Join(dir, "claude_desktop_config.json")},

@@ -453,6 +453,18 @@
   // agent written that isn't one of them had it taken out (#332).
   function report(res, done, given) {
     if (!res) return;
+    // skills installed together (lc on Discord): those the library had
+    // already, and those left out because another by that name is in the
+    // way, are named, beside how many were installed
+    const had = res.had || [], skipped = res.skipped || [];
+    if (had.length || skipped.length) {
+      const n = res.installed?.length || 0, parts = [];
+      if (n) parts.push(n === 1 ? t("1 skill installed") : t("{n} skills installed", { n }));
+      if (had.length) parts.push(t("already in the library: {names}", { names: had.join(", ") }));
+      for (const p of skipped) parts.push(t("{name} skipped: {error}", { name: p.what.replace(/^skill:/, ""), error: p.error }));
+      status(parts.join(" · "), skipped.length ? "warn" : "ok", skipped.length ? 12000 : 6000);
+      return;
+    }
     if (res.problems?.length) {
       const p = res.problems[0];
       status(t("{agent}: {error}", { agent: tilde(nameOf(p.agent)), error: p.error }) + (res.problems.length > 1 ? " " + t("(and {n} more)", { n: res.problems.length - 1 }) : ""), "warn", 8000);
@@ -1210,36 +1222,47 @@
   function sseBlocked(s) {
     return (a) => {
       if (remote(s) && a.noRemote) return t("{agent} runs only a command from its settings — add a remote server in its Connectors instead", { agent: a.name });
-      return s.transport === "sse" && a.noSSE ? t("{agent} can't reach a server over SSE — only a command or streamable HTTP", { agent: a.name }) : "";
+      if (s.transport === "sse" && a.noSSE) return t("{agent} can't reach a server over SSE — only a command or streamable HTTP", { agent: a.name });
+      // #1250: written there as it is, the agent would send the text
+      // itself; written with the value, the token would be in its file
+      return envRefs(s) && a.noEnvRefs ? t("{agent} can't read {ref} from its settings — given this server, the token would be written there as plain text", { agent: a.name, ref: "${NAME}" }) : "";
     };
   }
+  // envRefs says whether the server's headers (remote) or environment
+  // (command) reference a variable: ${NAME}, as the library writes one
+  const envRef = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/;
+  const envRefs = (s) => Object.values((remote(s) ? s.headers : s.env) || {}).some((v) => envRef.test(v));
   // reaches(s) says whether an agent can be given the server
   const remote = (s) => s.transport === "http" || s.transport === "sse";
-  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE));
+  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE) && !(envRefs(s) && a.noEnvRefs));
 
   function renderServers(body) {
     body.append(intro(t("Add a server once and switch it on for the agents that should have it — magpie writes it into each one's config in the shape that agent reads.")));
     const all = mcpAgents();
+    pickingFor("servers", lib.servers);
     if (!lib.servers.length) {
       const add = button(t("＋ Add a server"), "action", () => editServer(null));
       body.append(empty(t("No servers in the library yet"), lib.foundServers.length ? t("Add one, or bring in those your agents already have, below.") : t("Paste a server's JSON from its README, or fill it in."), add));
     } else {
-      // one agent's servers on or off at once (#475), or out of a hidden one
-      if (byAgentRows("servers").length) {
-        const rh = el("div", "row-head");
-        rh.append(el("span", "label", t("In the library")), el("span", "grow"), byAgentButton("servers"));
-        body.append(rh);
-      }
       const list = el("div", "list lib-list");
       // in the order the reader picked (#481), A→Z till then
       const fill = () => list.replaceChildren(...[...lib.servers].sort(byName(sortOf("libServers"))).map((s) => serverRow(s, all)));
-      if (lib.servers.length > 1) {
-        const rh = el("div", "row-head");
-        rh.append(el("span", "label", t("In the library")), el("span", "grow"), sortBy("libServers", NAME_SORTS, fill));
+      // one heading over the list, with what the skills' has (#1027): the
+      // order, Select, every server on or off for every agent shown, one
+      // agent's (#475, or out of a hidden one) and every server out
+      const many = lib.servers.length > 1, by = byAgentRows("servers").length;
+      if (many || by) {
+        const rh = el("div", "row-head lib-serverhead");
+        rh.append(el("span", "label", t("In the library")), el("span", "grow"));
+        if (many) rh.append(sortBy("libServers", NAME_SORTS, fill));
+        if (many && all.length) rh.append(pickButton("servers"), ...everyButtons("servers", all));
+        if (by) rh.append(byAgentButton("servers"));
+        if (many) rh.append(removeEveryButton("servers"));
         body.append(rh);
       }
       fill();
       body.append(list);
+      if (picking) body.append(pickBar(all));
       const after = el("div", "after-list");
       after.append(button(t("＋ Add server"), "", () => editServer(null)));
       body.append(after);
@@ -1266,7 +1289,7 @@
   }
 
   function serverRow(s, all) {
-    const row = el("div", "row lib-row click");
+    const row = el("div", "row lib-row click lib-server");
     const who = el("div", "who");
     const nm = el("div", "name mono", s.name);
     if (s.signIn?.dead) nm.append(tag(t("Sign-in ran out"), "warn", t("Open it to sign in again")));
@@ -1279,6 +1302,7 @@
     who.append(sub);
     row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), who,
       agentChips(all, s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s), all: true }));
+    if (picking) return pickRow(row, s.name);
     row.onclick = () => editServer(s);
     row.title = t("Edit {name}", { name: s.name });
     return row;
@@ -1333,6 +1357,9 @@
       case "refused": return [t("connection refused"), more(t("Nothing is listening at that address"))];
       case "unreachable": return [t("can't reach"), more(t("Can't reach the server"))];
       case "protocol": return [t("bad reply"), more(t("It answered, but not as an MCP server does"))];
+      // a ${NAME} magpie's own environment hasn't; an agent started from a
+      // shell that has it still gets it
+      case "novar": return [t("{names} not set", { names: h.detail }), t("magpie can't check it: {names} isn't set where magpie runs. An agent started where it is set still gets it", { names: h.detail })];
       default: return [t("couldn't check"), more(t("magpie couldn't check it"))];
     }
   }
@@ -1547,6 +1574,9 @@
     return i;
   }
 
+  // refHint: how a value is read from a variable (#1250)
+  const refHint = () => t("A value can name a variable, as {ref}: each agent is given it in its own way, so the token stays out of its settings", { ref: "${NAME}" });
+
   function editServer(s, prefill) {
     const all = mcpAgents();
     const d = prefill || (s ? structuredClone(s) : { name: "", transport: "stdio", command: "", args: [], env: {}, url: "", headers: {}, agents: all.map((a) => a.id) });
@@ -1581,12 +1611,12 @@
         const line = field2([d.command, ...(d.args || [])].filter((x, i) => i > 0 || x).map(quote).join(" "), "npx -y @modelcontextprotocol/server-github", (v) => { const w = words(v); d.command = w[0] || ""; d.args = w.slice(1); });
         line.classList.add("mono");
         g.append(...field(t("Command"), line, t("The command and its arguments, as you'd type them")));
-        g.append(...field(t("Environment"), pairs(d.env, "GITHUB_TOKEN", t("value"), (v) => { d.env = v; })));
+        g.append(...field(t("Environment"), pairs(d.env, "GITHUB_TOKEN", t("value"), (v) => { d.env = v; drawAgents(); }), refHint()));
       } else {
         const url = field2(d.url, "https://example.com/mcp", (v) => { d.url = v.trim(); });
         url.classList.add("mono");
         g.append(...field("URL", url));
-        g.append(...field(t("Headers"), pairs(d.headers, "Authorization", "Bearer …", (v) => { d.headers = v; })));
+        g.append(...field(t("Headers"), pairs(d.headers, "Authorization", "Bearer …", (v) => { d.headers = v; drawAgents(); }), refHint()));
         // Sign in saves the form first when it isn't what's saved, so a URL
         // just changed (or a server just added) is the one signed in to
         if (d.transport === "http") g.append(...field(t("Sign-in"), signInBox(s ? s.name : "", ready), t("For a server that asks you to sign in (OAuth): magpie signs in once, and every agent given it uses that sign-in")));
@@ -1722,8 +1752,7 @@
     body.append(intro(t("A skill is a folder with a SKILL.md an agent loads when it's needed. The library keeps each one once and links it into the agents you pick.")));
     body.append(installCard());
     const all = skillAgents();
-    for (const n of picked) if (!skillNamed(n)) picked.delete(n);
-    if (lib.skills.length < 2) picking = false;
+    pickingFor("skills", lib.skills);
     if (lib.skills.length) {
       const rh = el("div", "row-head lib-skillshead");
       rh.append(el("span", "label", t("In the library")));
@@ -1732,9 +1761,9 @@
       const fresh = lib.skills.filter((s) => s.kind === "github" || s.origin);
       rh.append(el("span", "grow"));
       if (lib.skills.length > 1) rh.append(sortBy("libSkills", SKILL_SORTS(), () => { if (box.isConnected) drawSkills(box, all); }));
-      if (lib.skills.length > 1 && all.length) rh.append(pickButton(), ...everySkillButtons(all));
+      if (lib.skills.length > 1 && all.length) rh.append(pickButton("skills"), ...everyButtons("skills", all));
       if (byAgentRows("skills").length) rh.append(byAgentButton("skills"));
-      if (lib.skills.length > 1) rh.append(removeEverySkillButton());
+      if (lib.skills.length > 1) rh.append(removeEveryButton("skills"));
       if (lib.skills.some((s) => s.kind === "github")) {
         const c = button(checking ? t("Checking…") : t("Check for updates"), "lib-updall", () => checkSkills());
         c.title = t("Ask GitHub which skills changed since they were installed");
@@ -1771,6 +1800,7 @@
       if (all.length) body.append(skillHowBar());
       if (picking) body.append(pickBar(all));
     }
+    if (lib.newSkills?.length) renderNewSkills(body);
     if (lib.foundSkills.length) {
       const rh = el("div", "row-head");
       rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("not in the library — bring one in to give it to the others")));
@@ -1802,6 +1832,66 @@
     body.append(discover("skills"));
   }
 
+  // Skills a check for updates found in the GitHub repositories the
+  // library's skills came from, beside them, that the library doesn't have:
+  // ones a repository added since, or one the picker showed and wasn't
+  // picked before magpie kept which it showed. Each is added for the agents
+  // that have its repository's others, or set aside so a check doesn't
+  // offer it again.
+  function renderNewSkills(body) {
+    const list = lib.newSkills;
+    const rh = el("div", "row-head lib-newhead");
+    rh.append(el("span", "label", t("Also in their repositories")), el("span", "grow"), el("span", "note", t("on GitHub beside skills you have, not in the library yet")));
+    if (list.length > 1) {
+      const ids = list.map((n) => n.id);
+      const ign = button(t("Ignore all"), "lib-updall", () => change("skills/ignore-new", { names: ids }, t("{n} skills set aside", { n: ids.length })));
+      ign.title = t("A check for updates won't offer these again");
+      const add = button(t("Add all"), "action lib-updall", async (e, b) => {
+        b.classList.add("busy");
+        b.textContent = t("Adding…");
+        await change("skills/add-new", { names: ids }, t("{n} skills added", { n: ids.length }));
+        b.classList.remove("busy");
+        b.textContent = t("Add all");
+      });
+      add.title = t("Adds the {n} skills, each for the agents that have its repository's other skills", { n: ids.length });
+      rh.append(ign, add);
+    }
+    body.append(rh);
+    const box = el("div", "list lib-list lib-newskills");
+    for (const n of list) box.append(newSkillRow(n));
+    body.append(box);
+  }
+
+  function newSkillRow(n) {
+    const row = el("div", "row lib-row lib-newskill");
+    const who = el("div", "who");
+    who.append(el("div", "name", n.name));
+    const sub = el("div", "sub", n.description || "");
+    sub.title = n.description || "";
+    who.append(sub);
+    const src = el("div", "lib-src");
+    const a = el("a", "lib-srclink", n.repo + "/" + n.path);
+    a.href = n.id;
+    a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); browse(n.id); };
+    src.append(a);
+    who.append(src);
+    const have = el("div", "lib-have");
+    // one find without its list of agents doesn't take the page down (#1217)
+    const agents = n.agents || [];
+    for (const id of agents) { const ag = agentOf(id); if (ag) { const i = agentIcon(ag.icon); i.title = ag.name; have.append(i); } }
+    const ign = button(t("Ignore"), "", () => change("skills/ignore-new", { names: [n.id] }, t("{name} set aside", { name: n.name })));
+    ign.title = t("A check for updates won't offer it again");
+    const add = button(t("Add"), "action", async (e, b) => {
+      b.classList.add("busy");
+      await change("skills/add-new", { names: [n.id] }, t("{name} is in the library now", { name: n.name }));
+      b.classList.remove("busy");
+    });
+    const names = agents.map(nameOf).join(", ");
+    add.title = names ? t("Adds it to the library for {agents}, which have its repository's other skills", { agents: names }) : t("Adds it to the library");
+    row.append(glyph(GLYPH.skill), who, have, ign, add);
+    return row;
+  }
+
   // ---------- the library's skills, by where they came from ----------
 
   // Hundreds of skills were one list of rows, every one of them drawn with
@@ -1813,7 +1903,7 @@
   // drawn, the rest is room kept for them, so a scroll through a thousand
   // skills draws a few rows now and then instead of laying out and painting
   // each as it comes into view.
-  let picking = false;         // the skills' rows have a box each, to pick some (#791)
+  let picking = "";            // "skills" or "servers": that page's rows have a box each, to pick some (#791, #1027)
   let naming = false;          // the pick bar asks the name of a group to put them in
   const picked = new Set();    // the names picked
   let skillQuery = "";         // what the filter over the skills holds
@@ -2135,39 +2225,53 @@
   // A part's chips (#791, mintonight: the lark-* skills of Feishu's pack
   // on or off together) and a pick's are the same, said of so many skills
   // rather than of a repository.
-  function groupChips(skills, all, repo) {
+  // Servers picked (#1027) are the same, counted of those an agent can
+  // reach: one given every server it can reach of them has them all, and
+  // one that can reach none of them can't be given them.
+  function groupChips(skills, all, repo, kind = "skills") {
+    const servers = kind === "servers";
     const n = skills.length, names = skills.map((s) => s.name);
-    const count = (id) => skills.filter((s) => s.agents?.includes(id)).length;
-    const full = all.filter((a) => count(a.id) === n).map((a) => a.id);
+    const can = (s, a) => !servers || reaches(s)(a);
+    const reach = (a) => skills.filter((s) => can(s, a)).length;
+    const count = (a) => skills.filter((s) => can(s, a) && s.agents?.includes(a.id)).length;
+    const full = all.filter((a) => reach(a) && count(a) === reach(a)).map((a) => a.id);
     const box = agentChips(all, full, async (next) => {
       const on = next.filter((id) => !full.includes(id)), off = full.filter((id) => !next.includes(id));
       box.classList.add("busy");
       try {
         let v = null;
-        if (on.length) v = await api("library/skills/agents-some", { names, agents: on, on: true });
-        if (off.length) v = await api("library/skills/agents-some", { names, agents: off, on: false });
+        if (on.length) v = await api("library/" + kind + "/agents-some", { names, agents: on, on: true });
+        if (off.length) v = await api("library/" + kind + "/agents-some", { names, agents: off, on: false });
         if (!v) return;
         take(v);
         const who = (ids) => ids.map(nameOf).join(", ");
         report(v.result, repo != null
           ? (on.length ? t("{repo}'s skills are on for {agents}", { repo, agents: who(on) }) : t("{repo}'s skills are off for {agents}", { repo, agents: who(off) }))
           : n === 1 ? (on.length ? t("{name} is on for {agents}", { name: names[0], agents: who(on) }) : t("{name} is off for {agents}", { name: names[0], agents: who(off) }))
+          : servers ? (on.length ? t("{n} servers are on for {agents}", { n, agents: who(on) }) : t("{n} servers are off for {agents}", { n, agents: who(off) }))
           : on.length ? t("{n} skills are on for {agents}", { n, agents: who(on) }) : t("{n} skills are off for {agents}", { n, agents: who(off) }));
       } catch (e) {
         status(e.message, "err", 6000);
       }
       render();
-    }, { all: true });
+    }, { all: true, blocked: servers ? (a) => (reach(a) ? "" : n === 1 ? sseBlocked(skills[0])(a) : t("{agent} can reach none of these servers", { agent: a.name })) : null });
     box.classList.add("lib-groupchips");
     for (const c of box.querySelectorAll(".lib-ag[data-agent]")) {
-      const a = all.find((x) => x.id === c.dataset.agent), k = count(a.id);
-      if (k && k < n) c.classList.add("some");
-      c.title = k === n ? t("{agent} has all of them — click to take them away", { agent: a.name })
-        : k ? t("{agent} has {n} of them — click to give it the rest", { agent: a.name, n: k })
-        : t("Give {agent} all of them", { agent: a.name });
+      const a = all.find((x) => x.id === c.dataset.agent), k = count(a), m = reach(a);
+      if (!m) continue;
+      if (k && k < m) c.classList.add("some");
+      c.title = servers
+        ? (k === m ? t("{agent} has all of these servers — click to take them away", { agent: a.name })
+          : k ? t("{agent} has {n} of these servers — click to give it the rest", { agent: a.name, n: k })
+          : t("Give {agent} all of these servers", { agent: a.name }))
+        : k === n ? t("{agent} has all of them — click to take them away", { agent: a.name })
+          : k ? t("{agent} has {n} of them — click to give it the rest", { agent: a.name, n: k })
+          : t("Give {agent} all of them", { agent: a.name });
     }
     const every = box.querySelector(".lib-ag.all");
-    if (every) every.title = every.classList.contains("on") ? t("Every agent has all of them — click to take them from every one") : t("Give all of them to every agent");
+    if (every) every.title = every.classList.contains("on")
+      ? (servers ? t("Every agent has all of these servers — click to take them from every one") : t("Every agent has all of them — click to take them from every one"))
+      : servers ? t("Give all of these servers to every agent") : t("Give all of them to every agent");
     return box;
   }
 
@@ -2177,14 +2281,34 @@
   // skills under it, and a bar under the list turns the ones picked on or
   // off for an agent at once (#791, mintonight: 能不能支持多选来开启或关闭):
   // its chips work as a group's do. Done takes the boxes away.
-  function pickButton() {
+  // The servers' page has the same (#1027, emo172), one box on each row.
+  function pickButton(kind) {
     const b = button(picking ? t("Done") : t("Select"), "action lib-updall lib-select", () => {
-      picking = !picking;
+      picking = picking ? "" : kind;
       picked.clear();
       render();
     });
-    b.title = picking ? t("Stop picking skills") : t("Pick some skills and turn them on or off together");
+    const skills = kind === "skills";
+    b.title = picking ? (skills ? t("Stop picking skills") : t("Stop picking servers"))
+      : skills ? t("Pick some skills and turn them on or off together") : t("Pick some servers and turn them on or off together");
     return b;
+  }
+
+  // what's picked is a page's own: another page, or a list too short to
+  // pick from, ends it, and a name no longer in the list isn't picked
+  function pickingFor(kind, items) {
+    if (picking && (picking !== kind || items.length < 2)) { picking = ""; picked.clear(); }
+    for (const n of picked) if (!items.some((x) => x.name === n)) picked.delete(n);
+  }
+
+  // a row with a box, which its click ticks rather than opening it
+  function pickRow(row, name) {
+    const box = pickBox([name]);
+    row.prepend(box);
+    row.classList.toggle("picked", picked.has(name));
+    row.onclick = () => box.click();
+    row.title = t("Select {name}", { name });
+    return row;
   }
 
   // the skills the filter shows, in every group, folded or not
@@ -2214,30 +2338,33 @@
     box.checked = k > 0 && k === box._names.length;
     box.indeterminate = k > 0 && k < box._names.length;
     const row = box.parentElement;
-    if (row?.classList.contains("lib-skill")) row.classList.toggle("picked", box.checked);
+    if (row?.classList.contains("lib-skill") || row?.classList.contains("lib-server")) row.classList.toggle("picked", box.checked);
   }
   // every box drawn, and the bar, as the picks are now
   function syncPicks() {
     if (!picked.size) naming = false;
     for (const b of page.querySelectorAll(".lib-pickbox")) paintPick(b);
     const bar = page.querySelector(".lib-pickbar");
-    if (bar) bar.replaceWith(pickBar(skillAgents()));
+    if (bar) bar.replaceWith(pickBar(picking === "servers" ? mcpAgents() : skillAgents()));
   }
 
+  // the servers' bar is the same, with no filter or groups (#1027)
   function pickBar(all) {
     const bar = el("div", "row lib-row lib-pickbar");
-    const shown = shownSkills(), q = skillQuery.trim();
+    const servers = picking === "servers";
+    const shown = servers ? lib.servers : shownSkills(), q = servers ? "" : skillQuery.trim();
     const every = el("label", "lib-pickall");
     every.append(pickAll(shown), el("span", "", q ? t("All {n} that match", { n: shown.length }) : t("All {n}", { n: shown.length })));
     every.onclick = (e) => e.stopPropagation();
-    const skills = lib.skills.filter((s) => picked.has(s.name));
+    const skills = (servers ? lib.servers : lib.skills).filter((s) => picked.has(s.name));
     const n = skills.length;
-    bar.append(every, el("span", "lib-pickn" + (n ? "" : " none"), n ? t("{n} selected", { n }) : t("Pick skills to turn them on or off together")), el("span", "grow"));
+    bar.append(every, el("span", "lib-pickn" + (n ? "" : " none"), n ? t("{n} selected", { n })
+      : servers ? t("Pick servers to turn them on or off together") : t("Pick skills to turn them on or off together")), el("span", "grow"));
     if (n && naming) return nameBar(bar, skills);
     if (n) {
-      bar.append(groupChips(skills, all, null));
+      bar.append(groupChips(skills, all, null, servers ? "servers" : "skills"));
       // a group of the user's made of them, or the ones in one let go (#791)
-      if (sortOf("libSkills", SKILL_SORTS()) === "source") {
+      if (!servers && sortOf("libSkills", SKILL_SORTS()) === "source") {
         const gb = button(t("Group…"), "lib-updall lib-pickgroup", () => { naming = true; syncPicks(); });
         gb.title = t("Put the skills picked in a group of your own");
         bar.append(gb);
@@ -2254,7 +2381,7 @@
       c.title = t("Unpick them all");
       bar.append(c);
     }
-    bar.append(button(t("Done"), "action lib-updall lib-pickdone", () => { picking = false; picked.clear(); render(); }));
+    bar.append(button(t("Done"), "action lib-updall lib-pickdone", () => { picking = ""; picked.clear(); render(); }));
     return bar;
   }
 
@@ -2301,7 +2428,7 @@
       take(v);
       folds["my:" + name] = false; // a group just made is shown open
       saveFolds();
-      picking = false;
+      picking = "";
       naming = false;
       picked.clear();
       report(v.result, skills.length === 1 ? t("{skill} is in {name}", { skill: skills[0].name, name }) : t("{n} skills are in {name}", { n: skills.length, name }));
@@ -2860,37 +2987,51 @@
     openLib(ed);
   }
 
-  function everySkillButtons(all) {
-    const ids = all.map((a) => a.id), n = all.length;
-    const on = button(t("Turn all on"), "action lib-updall lib-everyon", () => everySkill(ids, true));
-    on.title = t("Give every skill to all {n} agents that can take skills", { n });
-    on.disabled = lib.skills.every((s) => ids.every((id) => s.agents?.includes(id)));
-    const off = button(t("Turn all off"), "action lib-updall lib-everyoff", () => confirmEveryOff(ids));
-    off.title = t("Take every skill from all {n} agents", { n });
-    off.disabled = !lib.skills.some((s) => ids.some((id) => s.agents?.includes(id)));
+  // Every skill, or every server (#1027), on or off for every agent shown
+  // at once; an agent not shown keeps what it has, and a server goes only
+  // to the agents that can reach it, as its All chip gives it.
+  function everyButtons(kind, all) {
+    const ids = all.map((a) => a.id), n = all.length, skills = kind === "skills";
+    const items = skills ? lib.skills : lib.servers;
+    const can = (x, a) => skills || reaches(x)(a);
+    const on = button(t("Turn all on"), "action lib-updall lib-everyon", () => everyOf(kind, ids, true));
+    on.title = skills ? t("Give every skill to all {n} agents that can take skills", { n }) : t("Give every server to all {n} agents, each the ones it can reach", { n });
+    on.disabled = items.every((x) => all.every((a) => !can(x, a) || x.agents?.includes(a.id)));
+    const off = button(t("Turn all off"), "action lib-updall lib-everyoff", () => confirmEveryOff(kind, ids));
+    off.title = skills ? t("Take every skill from all {n} agents", { n }) : t("Take every server from all {n} agents", { n });
+    off.disabled = !items.some((x) => ids.some((id) => x.agents?.includes(id)));
     return [on, off];
   }
 
-  function confirmEveryOff(ids) {
+  function confirmEveryOff(kind, ids) {
+    const skills = kind === "skills", n = (skills ? lib.skills : lib.servers).length, agents = ids.map(nameOf).join(", ");
     const ed = el("div", "editor lib-editor");
     const head = el("div", "ehead");
-    head.append(glyph(GLYPH.skill), el("b", "", t("Turn off all {n} skills?", { n: lib.skills.length })));
+    head.append(glyph(skills ? GLYPH.skill : GLYPH.cmd), el("b", "", skills ? t("Turn off all {n} skills?", { n }) : t("Turn off all {n} servers?", { n })));
     ed.append(head);
-    ed.append(el("p", "lib-confirm", t("Every skill is taken out of {agents}. They stay in the library, to turn on again.", { agents: ids.map(nameOf).join(", ") })));
+    ed.append(el("p", "lib-confirm", skills
+      ? t("Every skill is taken out of {agents}. They stay in the library, to turn on again.", { agents })
+      : t("Every server is taken out of {agents}. They stay in the library, to turn on again.", { agents })));
     const bar = el("div", "bar");
-    const go = button(t("Turn all off"), "primary danger-fill", async () => { go.disabled = true; if (await everySkill(ids, false)) closeLibModal(true); else go.disabled = false; });
+    const go = button(t("Turn all off"), "primary danger-fill", async () => { go.disabled = true; if (await everyOf(kind, ids, false)) closeLibModal(true); else go.disabled = false; });
     bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
     ed.append(bar);
     modal = { save: () => go.click() };
     openLib(ed);
   }
 
-  async function everySkill(ids, on) {
+  async function everyOf(kind, ids, on) {
     try {
-      const v = await api("library/skills/agents-all", { agents: ids, on });
+      const v = await api("library/" + kind + "/agents-all", { agents: ids, on });
       take(v);
-      const n = lib.skills.length, m = ids.length;
-      report(v.result, on ? t("{n} skills are on for all {m} agents", { n, m }) : t("{n} skills are off for all {m} agents", { n, m }));
+      const m = ids.length;
+      if (kind === "skills") {
+        const n = lib.skills.length;
+        report(v.result, on ? t("{n} skills are on for all {m} agents", { n, m }) : t("{n} skills are off for all {m} agents", { n, m }));
+      } else {
+        const n = lib.servers.length;
+        report(v.result, on ? t("{n} servers are on for all {m} agents", { n, m }) : t("{n} servers are off for all {m} agents", { n, m }));
+      }
       render();
       return true;
     } catch (e) {
@@ -2984,47 +3125,72 @@
   // Every skill out of the library at once (#449), each as a row's Remove
   // takes it: out of every agent and project, its folder moved to magpie's
   // backups, or for one linked from a folder of the user's only the link
-  // taken away. It asks first, in the page, saying who loses what.
-  function removeEverySkillButton() {
-    const b = button(t("Remove all"), "action danger lib-updall lib-everyrm", () => confirmRemoveEverySkill());
-    b.title = t("Take all {n} skills out of the library", { n: lib.skills.length });
+  // taken away. Every server likewise (#1027): out of every agent and
+  // project magpie gave it to, its sign-in forgotten; the agents' servers
+  // of their own stay. It asks first, in the page, saying who loses what.
+  function removeEveryButton(kind) {
+    const skills = kind === "skills";
+    const b = button(t("Remove all"), "action danger lib-updall lib-everyrm", () => skills ? confirmRemoveEverySkill() : confirmRemoveEveryServer());
+    b.title = skills ? t("Take all {n} skills out of the library", { n: lib.skills.length }) : t("Take all {n} servers out of the library", { n: lib.servers.length });
     return b;
   }
 
-  function confirmRemoveEverySkill() {
-    const skills = lib.skills.slice(), names = skills.map((s) => s.name), n = names.length;
-    const agents = [...new Set(skills.flatMap((s) => s.agents || []))];
-    const linked = skills.filter((s) => s.kind === "folder").length, kept = n - linked;
-    const projects = (lib.projects || []).filter((p) => names.some((x) => p.skills?.[x]?.length)).length;
+  // the sheet asking first: its head and what it says, then Remove all n
+  function confirmRemoveEvery(kind, names, title, lines) {
     const ed = el("div", "editor lib-editor");
     const head = el("div", "ehead");
-    head.append(glyph(GLYPH.trash), el("b", "", t("Remove all {n} skills?", { n })));
+    head.append(glyph(GLYPH.trash), el("b", "", title));
     ed.append(head);
-    ed.append(el("p", "lib-confirm", agents.length
-      ? t("They are taken out of the library and out of {agents}.", { agents: agents.map(nameOf).join(", ") })
-      : t("They are taken out of the library; no agent has any of them.")));
-    if (projects) ed.append(el("p", "lib-confirm", t("The skills magpie placed in {n} projects are taken away too.", { n: projects })));
-    const where = [];
-    if (kept) where.push(t("{n} folders are moved to magpie's backups (Backups, at the foot of the Library), not deleted.", { n: kept }));
-    if (linked) where.push(t("{n} linked from folders of your own are only unlinked: those folders stay where they are.", { n: linked }));
-    ed.append(el("p", "lib-confirm", where.join(" ")));
+    for (const l of lines) if (l) ed.append(el("p", "lib-confirm", l));
     const bar = el("div", "bar");
-    const go = button(t("Remove all {n}", { n }), "primary danger-fill", async () => { go.disabled = true; if (await removeEverySkill(names)) closeLibModal(true); else go.disabled = false; });
+    const go = button(t("Remove all {n}", { n: names.length }), "primary danger-fill", async () => { go.disabled = true; if (await removeEvery(kind, names)) closeLibModal(true); else go.disabled = false; });
     bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
     ed.append(bar);
     modal = { save: () => go.click() };
     openLib(ed);
   }
+  const takenFrom = (items) => {
+    const agents = [...new Set(items.flatMap((s) => s.agents || []))];
+    return agents.length
+      ? t("They are taken out of the library and out of {agents}.", { agents: agents.map(nameOf).join(", ") })
+      : t("They are taken out of the library; no agent has any of them.");
+  };
 
-  async function removeEverySkill(names) {
+  function confirmRemoveEverySkill() {
+    const skills = lib.skills.slice(), names = skills.map((s) => s.name), n = names.length;
+    const linked = skills.filter((s) => s.kind === "folder").length, kept = n - linked;
+    const projects = (lib.projects || []).filter((p) => names.some((x) => p.skills?.[x]?.length)).length;
+    const where = [];
+    if (kept) where.push(t("{n} folders are moved to magpie's backups (Backups, at the foot of the Library), not deleted.", { n: kept }));
+    if (linked) where.push(t("{n} linked from folders of your own are only unlinked: those folders stay where they are.", { n: linked }));
+    confirmRemoveEvery("skills", names, t("Remove all {n} skills?", { n }), [
+      takenFrom(skills),
+      projects && t("The skills magpie placed in {n} projects are taken away too.", { n: projects }),
+      where.join(" "),
+    ]);
+  }
+
+  function confirmRemoveEveryServer() {
+    const servers = lib.servers.slice(), names = servers.map((s) => s.name), n = names.length;
+    const projects = (lib.projects || []).filter((p) => names.some((x) => p.servers?.[x]?.length)).length;
+    const signed = servers.filter((s) => s.signIn?.signedIn).length;
+    confirmRemoveEvery("servers", names, t("Remove all {n} servers?", { n }), [
+      takenFrom(servers),
+      projects && t("The servers magpie placed in {n} projects are taken away too.", { n: projects }),
+      signed && t("magpie's sign-in to {n} of them is forgotten too.", { n: signed }),
+      t("Servers your agents have that aren't in the library stay as they are."),
+    ]);
+  }
+
+  async function removeEvery(kind, names) {
     try {
-      const v = await api("library/skills/remove-all", { names });
+      const v = await api("library/" + kind + "/remove-all", { names });
       take(v);
       const res = v.result || {}, no = res.unremoved || [];
       if (no.length) {
         const p = no[0];
-        status(t("{name} wasn't removed: {error}", { name: p.what.replace(/^skill:/, ""), error: p.error }) + (no.length > 1 ? " " + t("(and {n} more)", { n: no.length - 1 }) : ""), "warn", 8000);
-      } else report(res, t("{n} skills removed", { n: names.length }));
+        status(t("{name} wasn't removed: {error}", { name: p.what.replace(/^(skill|mcp):/, ""), error: p.error }) + (no.length > 1 ? " " + t("(and {n} more)", { n: no.length - 1 }) : ""), "warn", 8000);
+      } else report(res, kind === "skills" ? t("{n} skills removed", { n: names.length }) : t("{n} servers removed", { n: names.length }));
       render();
       return true;
     } catch (e) {
@@ -3045,6 +3211,8 @@
       const n = got.filter((s) => s.check.status === "update").length;
       const unknown = got.filter((s) => s.check.status === "unknown");
       let msg = n ? (n === 1 ? t("1 skill has an update") : t("{n} skills have updates", { n })) : t("Every skill is up to date");
+      const more = lib.newSkills?.length || 0;
+      if (more) msg += " · " + (more === 1 ? t("1 more skill in their repositories") : t("{n} more skills in their repositories", { n: more }));
       if (unknown.length) {
         msg += " · " + t("{n} couldn't be checked: {error}", { n: unknown.length, error: checkError(unknown[0].check) });
         status(msg, "warn", 8000);
@@ -3053,7 +3221,9 @@
       status(e.message, "err", 6000);
     }
     checking = false;
-    render();
+    // drawn after the await, a page that can't be drawn says why, as one
+    // loaded does, not left blank without a word (#1217)
+    try { render(); } catch (e) { status(e.message, "err"); }
   }
 
   // why a skill couldn't be checked: GitHub's rate limit used up said in
@@ -3257,14 +3427,7 @@
     rm.title = t("Remove");
     acts.append(rm);
     row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true, always: alwaysFor(s) }));
-    if (picking) {
-      const box = pickBox([s.name]);
-      row.prepend(box);
-      row.classList.toggle("picked", picked.has(s.name));
-      row.onclick = () => box.click();
-      row.title = t("Select {name}", { name: s.name });
-      return row;
-    }
+    if (picking) return pickRow(row, s.name);
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;
@@ -3633,10 +3796,14 @@
     const d = el("p", "mk-desc" + (x.description ? "" : " wait"), x.description || "");
     d.title = x.description || "";
     const foot = el("div", "mk-foot");
-    const n = el("span", "mk-installs");
-    n.append(svg(GLYPH.down, 11, 1.5), el("span", "", compact(x.installs)));
-    n.title = t("{n} installs", { n: x.installs.toLocaleString() });
-    foot.append(n, el("span", "grow"), addButton(x, () => addSkill(x)));
+    // magpie's own skill has no count until skills.sh lists it
+    if (!x.featured || x.installs) {
+      const n = el("span", "mk-installs");
+      n.append(svg(GLYPH.down, 11, 1.5), el("span", "", compact(x.installs)));
+      n.title = t("{n} installs", { n: x.installs.toLocaleString() });
+      foot.append(n);
+    }
+    foot.append(el("span", "grow"), addButton(x, () => addSkill(x)));
     c.append(top, d, foot);
     c.onclick = () => skillSheet(x);
     c.title = t("About {name}", { name: x.name });
@@ -3659,10 +3826,12 @@
     const who = el("div", "mk-who");
     who.append(el("div", "mk-name big", x.name));
     const meta = el("div", "mk-meta");
-    meta.append(el("span", "mk-pub", x.source), el("span", "mk-badge", t("{n} installs", { n: compact(x.installs) })));
+    meta.append(el("span", "mk-pub", x.source));
+    if (!x.featured || x.installs) meta.append(el("span", "mk-badge", t("{n} installs", { n: compact(x.installs) })));
     if (x.official) meta.append(el("span", "mk-badge", t("Official")));
     who.append(meta);
-    head.append(logo(x.icon, x.source), who, extLink("https://skills.sh/" + x.source + "/" + x.skillId, "skills.sh"));
+    head.append(logo(x.icon, x.source), who);
+    if (!x.featured) head.append(extLink("https://skills.sh/" + x.source + "/" + x.skillId, "skills.sh"));
     ed.append(head);
     const about = el("p", "mk-about", x.description || "…");
     ed.append(about);

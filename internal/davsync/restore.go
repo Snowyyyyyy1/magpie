@@ -36,10 +36,7 @@ func SetAuto(minutes int) error {
 		if err != nil {
 			return err
 		}
-		if err := edit.WriteAtomic(path("sync.json"), b); err != nil {
-			return err
-		}
-		return os.Chmod(path("sync.json"), 0o600)
+		return edit.WritePrivate(path("sync.json"), b)
 	})
 }
 
@@ -250,10 +247,9 @@ func keepHere(c Config) (string, error) {
 		return "", err
 	}
 	name := filepath.Join(dir, time.Now().Format("2006-01-02-150405")+"-before-restore"+backup.Ext)
-	if err := edit.WriteAtomic(name, sealed); err != nil {
+	if err := edit.WritePrivate(name, sealed); err != nil {
 		return "", err
 	}
-	os.Chmod(name, 0o600)
 	old, _ := filepath.Glob(filepath.Join(dir, "*-before-restore"+backup.Ext))
 	slices.Sort(old)
 	for len(old) > 5 {

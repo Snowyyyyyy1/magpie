@@ -50,11 +50,10 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			}
 			name = filepath.Join(dir, fmt.Sprintf("magpie-%s-%d%s", time.Now().Format("2006-01-02"), i, backup.Ext))
 		}
-		if err := edit.WriteAtomic(name, data); err != nil {
+		if err := edit.WritePrivate(name, data); err != nil {
 			fail(rw, err)
 			return
 		}
-		os.Chmod(name, 0o600)
 		_ = w.OpenFolder(dir) // saved either way; the path is in the answer
 		writeJSON(rw, map[string]any{"path": tilde(name), "providers": len(b.Providers), "profiles": len(b.Profiles), "agents": len(b.Agents), "library": b.Library != nil})
 	})

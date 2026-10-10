@@ -127,7 +127,7 @@ func (l *Library) save() error {
 	if err != nil {
 		return err
 	}
-	return edit.WriteAtomic(path(), append(b, '\n'))
+	return edit.WritePrivate(path(), append(b, '\n'))
 }
 
 func (l *Library) applied(agent string) *Applied {

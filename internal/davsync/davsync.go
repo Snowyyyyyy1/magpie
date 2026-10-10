@@ -252,10 +252,7 @@ func Configure(c Config) error {
 			return err
 		}
 		os.MkdirAll(settings.Dir(), 0o755)
-		if err := edit.WriteAtomic(path("sync.json"), b); err != nil {
-			return err
-		}
-		return os.Chmod(path("sync.json"), 0o600)
+		return edit.WritePrivate(path("sync.json"), b)
 	})
 }
 
@@ -445,7 +442,7 @@ func loadState() state {
 
 func saveState(st state) {
 	b, _ := json.MarshalIndent(st, "", "  ")
-	edit.WriteAtomic(path("sync-state.json"), b)
+	edit.WritePrivate(path("sync-state.json"), b)
 }
 
 // stateKey is the setup the state is for: an S3 endpoint too, when there is one
@@ -468,9 +465,7 @@ func remember(data []byte) {
 		return
 	}
 	os.MkdirAll(settings.Dir(), 0o755)
-	if edit.WriteAtomic(path(cacheName), data) == nil {
-		os.Chmod(path(cacheName), 0o600)
-	}
+	edit.WritePrivate(path(cacheName), data)
 }
 
 // cached is the server's file as last seen, when it is the one hashed to
@@ -499,10 +494,9 @@ func keepAside(data []byte, tag string, n int) error {
 		return err
 	}
 	name := filepath.Join(dir, time.Now().Format("2006-01-02-150405")+"-"+tag+backup.Ext)
-	if err := edit.WriteAtomic(name, data); err != nil {
+	if err := edit.WritePrivate(name, data); err != nil {
 		return err
 	}
-	os.Chmod(name, 0o600)
 	old, _ := filepath.Glob(filepath.Join(dir, "*-"+tag+backup.Ext))
 	slices.Sort(old) // names begin with the time, so oldest first
 	for len(old) > n {
@@ -1041,11 +1035,11 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		stamp := time.Now().Format("2006-01-02-150405")
 		if len(here) > 0 {
 			if b, err := backup.Seal(local, c.Passphrase); err == nil {
-				edit.WriteAtomic(filepath.Join(dir, stamp+"-this-computer"+backup.Ext), b)
+				edit.WritePrivate(filepath.Join(dir, stamp+"-this-computer"+backup.Ext), b)
 			}
 		}
 		if len(there) > 0 {
-			edit.WriteAtomic(filepath.Join(dir, stamp+"-server"+backup.Ext), data)
+			edit.WritePrivate(filepath.Join(dir, stamp+"-server"+backup.Ext), data)
 		}
 		saved = dir
 	}

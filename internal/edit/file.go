@@ -38,7 +38,15 @@ func Read(path string) ([]byte, error) {
 // at is written and the link stays; a file with other hard links is
 // written in place, see writeInPlace. Once written, temp files earlier
 // writes of path left behind go, see removeStaleTemps.
-func WriteAtomic(path string, data []byte) error {
+func WriteAtomic(path string, data []byte) error { return writeAtomic(path, data, false) }
+
+// WritePrivate is WriteAtomic for a file that holds a secret (a key, a
+// token, a password, a sealed backup): it is readable by the user alone
+// from the moment it exists, 0600 whatever mode it had, rather than made
+// 0644 and closed after, which leaves a moment anyone can read it.
+func WritePrivate(path string, data []byte) error { return writeAtomic(path, data, true) }
+
+func writeAtomic(path string, data []byte, private bool) error {
 	defer filememo.Forget() // read again, where a request holds it
 	path, err := Target(path)
 	if err != nil {
@@ -49,6 +57,11 @@ func WriteAtomic(path string, data []byte) error {
 		if err == nil {
 			if err := writeInPlace(f, data); err != nil {
 				return err
+			}
+			if private {
+				if err := os.Chmod(path, 0o600); err != nil {
+					return err
+				}
 			}
 			removeStaleTemps(path)
 			return nil
@@ -62,7 +75,9 @@ func WriteAtomic(path string, data []byte) error {
 		}
 	}
 	mode := fs.FileMode(0o644)
-	if st, err := os.Stat(path); err == nil {
+	if private {
+		mode = 0o600
+	} else if st, err := os.Stat(path); err == nil {
 		mode = st.Mode().Perm()
 	}
 	dir := filepath.Dir(path)

@@ -50,10 +50,9 @@ func backupCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := edit.WriteAtomic(file, data); err != nil {
+	if err := edit.WritePrivate(file, data); err != nil {
 		return err
 	}
-	os.Chmod(file, 0o600)
 	what := "with their keys"
 	if !keys {
 		what = "without keys"

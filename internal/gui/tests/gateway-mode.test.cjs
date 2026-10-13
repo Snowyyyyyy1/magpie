@@ -34,10 +34,12 @@ function settingsPayload(over) {
 }
 
 // agents says whether magpie found agents here: Automatic is on without
-function server(lang, posts, { web = true, gateway = true, agents = false } = {}) {
+// notice is Settings' warning for the Codex subagents row, when the answer
+// carries one
+function server(lang, posts, { web = true, gateway = true, agents = false, notice } = {}) {
   const why = (mode) => (mode === "on" || mode === "off" ? mode : agents ? "" : "no-agents");
   const on = (mode) => web && (mode === "on" || (mode !== "off" && !agents));
-  let cur = settingsPayload({ lang, web, gatewayMode: "", gatewayOn: web && gateway, gatewayWhy: web && gateway ? why("") : "" });
+  let cur = settingsPayload({ lang, web, gatewayMode: "", gatewayOn: web && gateway, gatewayWhy: web && gateway ? why("") : "", ...(notice ? { notice, codexAgentsV1: true } : {}) });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
@@ -48,6 +50,14 @@ function server(lang, posts, { web = true, gateway = true, agents = false } = {}
       const { mode } = req.postDataJSON();
       posts.push(["gateway-mode", mode]);
       cur = { ...cur, gatewayMode: mode, gatewayOn: on(mode), gatewayWhy: on(mode) || mode === "off" ? why(mode) : "" };
+      return json(cur);
+    }
+    if (url.pathname === "/api/settings/codex-agents-v1") {
+      const { on: v1 } = req.postDataJSON();
+      posts.push(["codex-agents-v1", v1]);
+      // the answer's notice follows the switch: off clears the warning, on
+      // brings it back, and cur keeps it so a later reload agrees
+      cur = { ...cur, codexAgentsV1: v1, notice: v1 ? notice : undefined };
       return json(cur);
     }
     if (url.pathname === "/api/settings") {
@@ -184,6 +194,96 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(errors, [], where);
         await context.close();
       }
+    }
+  });
+}
+
+// Settings' Codex subagents row carries the warning element
+// #codexAgentsV1Warn: with `notice` in the settings answer it shows the text
+// (translated), without one it stays hidden. magpie writes nothing here — the
+// user turns Codex's own multi_agent_v2 off themselves (#141, #1028 review).
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: the codex subagents warning row`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    // not an i18n key, so t() hands it back as it is in every language
+    const notice = "Codex's own multi_agent_v2 is on in the config magpie routes (#141 probe)";
+    for (const [withNotice, what] of [[true, "with notice"], [false, "without notice"]]) {
+      const where = `${engine} ${what}`;
+      const context = await browser.newContext({ viewport: { width: 1100, height: 560 }, reducedMotion: "reduce" });
+      const page = await context.newPage();
+      page.setDefaultTimeout(5000);
+      const errors = [], posts = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      // window mode: the gateway switch is the web's alone, so the agents' rows
+      // are shown and the warning row is rendered here
+      await page.route("**/*", server("en", posts, { web: false, gateway: false, agents: true, notice: withNotice ? notice : undefined }));
+      await page.goto("http://magpie.test/");
+      await page.waitForSelector("#nav button.on");
+      await page.locator("#prefs").click();
+      await page.locator("#codexAgentsV1Segs .opt").first().waitFor();
+      const warn = page.locator("#codexAgentsV1Warn");
+      assert.equal(await warn.isVisible(), withNotice, `${where}: the warning row`);
+      if (withNotice) {
+        assert.equal((await warn.textContent()).trim(), notice, `${where}: the text`);
+        // the switch's own answer drives the row: off clears the warning, on
+        // brings it back, and a reload agrees. The segs box puts a thumb span
+        // before its two buttons, so pick the buttons by state, not by child
+        // index, and name what the seed is first.
+        assert.equal((await page.locator("#codexAgentsV1Segs .opt.on").textContent()).trim(), "On", `${where}: seeded on`);
+        const off = page.locator("#codexAgentsV1Segs .opt:not(.on)");
+        assert.equal((await off.textContent()).trim(), "Off", `${where}: the other option is Off`);
+        await off.click();
+        await page.waitForFunction(() => document.querySelector("#codexAgentsV1Warn").hidden);
+        assert.deepEqual(posts.filter((p) => p[0] === "codex-agents-v1").slice(-1), [["codex-agents-v1", false]], `${where}: the off post`);
+        const on = page.locator("#codexAgentsV1Segs .opt:not(.on)");
+        assert.equal((await on.textContent()).trim(), "On", `${where}: after off the other option is On`);
+        await on.click();
+        await page.waitForFunction(() => !document.querySelector("#codexAgentsV1Warn").hidden);
+        assert.deepEqual(posts.filter((p) => p[0] === "codex-agents-v1").slice(-1), [["codex-agents-v1", true]], `${where}: the on post`);
+        // a reload restores the Settings view from the URL, and the settings
+        // answer still carries the warning
+        await page.reload();
+        await page.locator("#codexAgentsV1Segs .opt").first().waitFor();
+        assert.equal(await page.locator("#codexAgentsV1Warn").isVisible(), true, `${where}: back after a reload`);
+      }
+      assert.deepEqual(errors, [], where);
+      await context.close();
+    }
+  });
+
+  // the real warning, joined with Codex's restart advice as Notice joins
+  // them, reads in the page's language at a narrow window and pushes nothing
+  // past its edge
+  test(`${engine}: the codex subagents warning in every language, narrow`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const warning = "Codex's own multi_agent_v2 is on in the config magpie routes, which takes over the multi-agent V1 magpie's models ask for; turn it off in Codex's config to run subagents on magpie's models.";
+    const restart = "Codex builds its model list at start-up — restart the Codex app, open codex sessions and the app-server they share (codex app-server daemon restart) to see this.";
+    for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+      const context = await browser.newContext({ viewport: { width: 420, height: 720 }, reducedMotion: "reduce" });
+      const page = await context.newPage();
+      page.setDefaultTimeout(5000);
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.route("**/*", server(lang, [], { web: false, gateway: false, agents: true, notice: warning + " " + restart }));
+      await page.goto("http://magpie.test/");
+      await page.waitForSelector("#nav button.on");
+      await page.locator("#prefs").click();
+      await page.locator("#codexAgentsV1Segs .opt").first().waitFor();
+      const warn = page.locator("#codexAgentsV1Warn");
+      assert.equal(await warn.isVisible(), true, `${engine} ${lang}: the warning row`);
+      const text = (await warn.textContent()).trim();
+      if (lang === "en") assert.equal(text, warning + " " + restart, `${engine} ${lang}: the text`);
+      else {
+        assert.ok(!text.includes("turn it off") && !text.includes("builds its model list"), `${engine} ${lang}: left in English: ${text}`);
+        assert.ok(text.includes("multi_agent_v2") && text.includes("codex app-server daemon restart"), `${engine} ${lang}: lost a name: ${text}`);
+      }
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `${engine} ${lang}: the page scrolls sideways`);
+      const box = await warn.boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= 420, `${engine} ${lang}: the row runs past the window: ${JSON.stringify(box)}`);
+      assert.deepEqual(errors, [], `${engine} ${lang}`);
+      await context.close();
     }
   });
 }
